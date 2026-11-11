@@ -25,13 +25,20 @@ if (-not $compiler) {
 }
 $env:Path = (Split-Path -Parent $compiler) + ';' + $env:Path
 $sources = @(Get-ChildItem -Path src/core,src/windows -File -Filter '*.cpp' | ForEach-Object FullName)
-$tempExe = Join-Path $PWD 'Calcu.build.exe'
+$binary = Join-Path $PWD 'Calcu.exe'
+$tempExe = Join-Path $PWD "Calcu.build.$PID.exe"
 try {
     & $compiler -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -DNOMINMAX -I include @sources -static -municode -mwindows -lwinhttp -lcrypt32 -lgdi32 -o $tempExe
     if ($LASTEXITCODE -ne 0) { throw 'No se pudo compilar. Revisa los mensajes anteriores.' }
-    Move-Item -LiteralPath $tempExe -Destination (Join-Path $PWD 'Calcu.exe') -Force
+    if ([IO.File]::Exists($binary)) {
+        [IO.File]::Replace($tempExe, $binary, [System.Management.Automation.Language.NullString]::Value)
+    } else {
+        [IO.File]::Move($tempExe, $binary)
+    }
 } catch {
     Write-Host $_.Exception.Message
     Write-Host 'Si Calcu ya esta abierto, cierralo y vuelve a intentar.'
     exit 1
+} finally {
+    [IO.File]::Delete($tempExe)
 }

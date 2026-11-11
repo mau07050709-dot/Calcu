@@ -8,10 +8,13 @@ namespace calcu::config {
 inline constexpr std::size_t expressionLimit = 128;
 inline constexpr std::size_t questionLimit = 240;
 inline constexpr std::size_t answerLimit = 768;
+inline constexpr std::size_t chatHistoryLimit = 4;
 inline constexpr uint32_t multiTapMs = 750;
 inline constexpr uint32_t shortcutMs = 1200;
 inline constexpr char shortcutPrefix = '*';
 inline constexpr char modeKey = '#';
+
+enum class LcdController { legacyFlag, serial, hd44780Parallel };
 
 struct Hardware {
     bool matrixEnabled = false;
@@ -24,6 +27,14 @@ struct Hardware {
     int lcdRs = -1;
     int lcdEnable = -1;
     std::array<int, 4> lcdData{{-1, -1, -1, -1}};
+    LcdController lcdController = LcdController::legacyFlag;
+    std::array<uint8_t, 2> lcdRowAddresses{{0x00, 0x40}};
+    bool matrixInternalPullups = true;
+
+    constexpr bool usesParallelLcd() const {
+        return lcdController == LcdController::legacyFlag ? parallelLcdEnabled :
+            lcdController == LcdController::hd44780Parallel;
+    }
 };
 
 struct Network {

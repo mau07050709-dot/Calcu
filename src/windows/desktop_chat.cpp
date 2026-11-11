@@ -47,18 +47,12 @@ struct InternetHandle {
 ChatReply error(const char* message) { return {ChatStatus::error, message}; }
 
 ChatReply networkError() {
-    if (GetLastError() == ERROR_WINHTTP_TIMEOUT) return error("Tiempo de espera");
-    if (GetLastError() == ERROR_WINHTTP_SECURE_FAILURE) return error("Certificado TLS");
+    const auto code = GetLastError();
+    if (code == ERROR_WINHTTP_TIMEOUT) return error("Tiempo de espera");
+    if (code == ERROR_WINHTTP_SECURE_FAILURE) return error("Certificado TLS");
+    if (code == ERROR_WINHTTP_NAME_NOT_RESOLVED) return error("Nombre DNS invalido");
+    if (code == ERROR_WINHTTP_CANNOT_CONNECT) return error("Proxy inaccesible");
     return error("Fallo de red");
-}
-
-std::string questionJson(std::string_view question) {
-    std::string json = "{\"question\":\"";
-    for (char c : question) {
-        if (c == '\\' || c == '"') json += '\\';
-        json += c >= ' ' && c <= '~' ? c : '?';
-    }
-    return json + "\"}";
 }
 
 // El contrato del intermediario devuelve un objeto con un solo campo ASCII.
@@ -98,24 +92,32 @@ std::string answerFromJson(std::string_view json) {
     return {};
 }
 
-ChatReply request(Connection connection, std::string question) {
-    const auto endpoint = parseUrl(connection.url);
+ChatReply request(Connection connection, std::string body, bool health) {
+    auto endpoint = parseUrl(connection.url);
     if (endpoint.host.empty()) return error("URL HTTPS invalida");
+    if (health) {
+        endpoint.path = endpoint.path.substr(0, endpoint.path.find(L'?'));
+        constexpr std::wstring_view route = L"/ask";
+        if (endpoint.path.size() < route.size() ||
+            endpoint.path.compare(endpoint.path.size() - route.size(), route.size(), route) != 0) {
+            return error("La URL debe terminar en /ask");
+        }
+        endpoint.path.replace(endpoint.path.size() - 3, 3, L"health");
+    }
     InternetHandle session(WinHttpOpen(L"Calcu/2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 7000, 7000, 32000)) {
+    if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 7000, 7000, health ? 8000 : 32000)) {
         return networkError();
     }
     InternetHandle host(WinHttpConnect(session.value, endpoint.host.c_str(), endpoint.port, 0));
     if (!host.value) return networkError();
-    InternetHandle post(WinHttpOpenRequest(host.value, L"POST", endpoint.path.c_str(),
+    InternetHandle post(WinHttpOpenRequest(host.value, health ? L"GET" : L"POST", endpoint.path.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
     if (!post.value) return networkError();
     DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     if (!WinHttpSetOption(post.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof redirects)) {
         return networkError();
     }
-    auto body = questionJson(question);
     const std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " +
         connection.token + L"\r\n";
     const DWORD length = static_cast<DWORD>(body.size());
@@ -127,8 +129,10 @@ ChatReply request(Connection connection, std::string question) {
     if (!WinHttpQueryHeaders(post.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeSize, WINHTTP_NO_HEADER_INDEX)) return networkError();
     if (code == 401 || code == 403) return error("Token rechazado");
+    if (code == 424) return error("Clave/modelo API");
     if (code == 429 || code == 503) return error("Servidor ocupado");
     if (code == 504) return error("Tiempo de espera");
+    if (code == 404) return error("Ruta del proxy");
     if (code != 200) return error("Error del proxy");
 
     std::string json;
@@ -139,9 +143,29 @@ ChatReply request(Connection connection, std::string question) {
         if (json.size() + count > 2048) return error("Respuesta extensa");
         json.append(buffer, count);
     } while (count != 0);
+    if (health) {
+        if (json != R"({"service":"calcu","ready":true})") return error("Respuesta de prueba invalida");
+        return {ChatStatus::answer, "HTTPS y token correctos. Envia una pregunta para probar OpenAI."};
+    }
     auto answer = answerFromJson(json);
     if (answer.empty()) return error("Respuesta invalida");
     return {ChatStatus::answer, std::move(answer)};
+}
+
+bool ready(const std::future<ChatReply>& job) {
+    return job.valid() && job.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+}
+
+std::future<ChatReply> launch(const Connection& connection, std::string body, bool health) {
+    std::packaged_task<ChatReply(Connection, std::string, bool)> job(request);
+    auto result = job.get_future();
+    std::thread(std::move(job), connection, std::move(body), health).detach();
+    return result;
+}
+
+ChatReply take(std::future<ChatReply>& job) {
+    try { return job.get(); }
+    catch (const std::exception&) { return error("Fallo de red"); }
 }
 }
 
@@ -159,6 +183,10 @@ void DesktopChat::configure(Connection connection) {
 }
 
 ChatReply DesktopChat::start(std::string_view question, uint32_t now) {
+    return startWithHistory(question, {}, now);
+}
+
+ChatReply DesktopChat::startWithHistory(std::string_view question, const ChatHistory& history, uint32_t now) {
     if (connection_.demo) {
         started_ = now;
         demoAnswer_ = "Modo demostracion. Pregunta: " + std::string(question) +
@@ -174,10 +202,7 @@ ChatReply DesktopChat::start(std::string_view question, uint32_t now) {
         work_ = {};
     }
     try {
-        std::packaged_task<ChatReply(Connection, std::string)> job(request);
-        auto result = job.get_future();
-        std::thread(std::move(job), connection_, std::string(question)).detach();
-        work_ = std::move(result);
+        work_ = launch(connection_, chatRequestJson(question, history), false);
     } catch (const std::exception&) {
         return error("Fallo de inicio");
     }
@@ -192,10 +217,8 @@ ChatReply DesktopChat::poll(uint32_t now) {
         return {ChatStatus::answer, std::exchange(demoAnswer_, {})};
     }
     if (!work_.valid()) return {ChatStatus::idle, {}};
-    if (work_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        ChatReply reply;
-        try { reply = work_.get(); }
-        catch (const std::exception&) { reply = error("Fallo de red"); }
+    if (ready(work_)) {
+        auto reply = take(work_);
         status_ = reply.status == ChatStatus::answer ? L"HTTPS conectado" : L"Error de conexión";
         return reply;
     }
@@ -203,6 +226,24 @@ ChatReply DesktopChat::poll(uint32_t now) {
         status_ = L"Tiempo de espera agotado";
         return error("Tiempo de espera");
     }
+    return {ChatStatus::pending, {}};
+}
+
+ChatReply DesktopChat::check(const Connection& connection, uint32_t now) {
+    if (!connection.configured() || !validUrl(connection.url) || !validToken(connection.token)) {
+        return error("Completa URL HTTPS y token.");
+    }
+    if (check_.valid() && !ready(check_)) return error("La prueba anterior sigue en curso.");
+    try { check_ = launch(connection, {}, true); }
+    catch (const std::exception&) { return error("No se pudo iniciar la prueba."); }
+    checkStarted_ = now;
+    return {ChatStatus::pending, {}};
+}
+
+ChatReply DesktopChat::pollCheck(uint32_t now) {
+    if (!check_.valid()) return {ChatStatus::idle, {}};
+    if (ready(check_)) return take(check_);
+    if (now - checkStarted_ >= 20000) return error("Tiempo de espera de la prueba.");
     return {ChatStatus::pending, {}};
 }
 

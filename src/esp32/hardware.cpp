@@ -1,4 +1,5 @@
 #include "hardware.hpp"
+#include "hardware_profile.hpp"
 
 #include <driver/gpio.h>
 
@@ -17,10 +18,9 @@ bool inputPin(int pin) {
 
 bool BoardKeypad::begin() {
     if (!hw.matrixEnabled) return true;
-    for (int row : hw.rows) if (!outputPin(row)) return false;
-    for (int column : hw.columns) if (!inputPin(column)) return false;
+    if (!validateHardware(hw, outputPin, inputPin).keypad) return false;
     for (int row : hw.rows) pinMode(row, INPUT);
-    for (int column : hw.columns) pinMode(column, INPUT_PULLUP);
+    for (int column : hw.columns) pinMode(column, hw.matrixInternalPullups ? INPUT_PULLUP : INPUT);
     matrix_ = true;
     return true;
 }
@@ -59,9 +59,8 @@ char BoardKeypad::poll(uint32_t now) {
 }
 
 bool BoardDisplay::begin() {
-    if (!hw.parallelLcdEnabled) return true;
-    if (!outputPin(hw.lcdRs) || !outputPin(hw.lcdEnable)) return false;
-    for (int pin : hw.lcdData) if (!outputPin(pin)) return false;
+    if (!hw.usesParallelLcd()) return true;
+    if (!validateHardware(hw, outputPin, inputPin).lcd) return false;
     pinMode(hw.lcdRs, OUTPUT);
     pinMode(hw.lcdEnable, OUTPUT);
     digitalWrite(hw.lcdRs, LOW);
@@ -112,7 +111,7 @@ void BoardDisplay::write(const Frame& frame, const Frame& previous) {
     }
     for (std::size_t row = 0; row < lcdRows; ++row) {
         if (frame[row] == previous[row]) continue;
-        send(row == 0 ? 0x80 : 0xc0);
+        send(0x80 | hw.lcdRowAddresses[row]);
         for (char cell : frame[row]) send(static_cast<uint8_t>(cell), true);
     }
 }

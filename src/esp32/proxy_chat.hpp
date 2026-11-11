@@ -13,18 +13,18 @@ public:
     explicit ProxyChat(Wifi& wifi) : wifi_(wifi) {}
     void begin();
     ChatReply start(std::string_view question, uint32_t now) override;
+    ChatReply startWithHistory(std::string_view question, const ChatHistory& history, uint32_t now) override;
     ChatReply poll(uint32_t now) override;
     const char* connectionLabel() const override;
 
 private:
-    struct Request { char question[config::questionLimit + 1]; };
     struct Result {
         ChatStatus status;
         char text[config::answerLimit + 1];
     };
 
     static void run(void* context);
-    ChatReply ask(const char* question) const;
+    ChatReply ask(std::string& body) const;
     bool configured() const;
 
     Wifi& wifi_;

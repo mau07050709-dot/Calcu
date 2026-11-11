@@ -28,7 +28,8 @@ constexpr int symbolBase = 200;
 enum Id {
     star = 300, hash, switchMode, preferences, erase, clear, cursorLeft, cursorRight,
     go, angle, letters, commit, previous, next, save, cancel,
-    prefixField, modeField, urlField, tokenField, demoField, formatKey, historyOlder, historyNewer
+    prefixField, modeField, urlField, tokenField, demoField, formatKey, historyOlder, historyNewer,
+    testConnection, conversationHistory
 };
 enum class Panel { common, calculator, chat, settings };
 enum Style { neutral, primary, mutedButton };
@@ -114,6 +115,9 @@ private:
     void refresh();
     void showSettings();
     void storeSettings();
+    Connection connectionFromFields() const;
+    void checkConnection();
+    void updateConnectionCheck();
     void notify(const wchar_t* value);
     void persistMathSettings();
     RECT mathInput() const { return {px(49), px(118), px(669), px(202)}; }
@@ -140,6 +144,8 @@ private:
     HBRUSH lcdBrush_ = nullptr;
     std::vector<Control> controls_;
     bool settingsOpen_ = false;
+    bool checkingConnection_ = false;
+    Connection checkedConnection_;
     bool panelDirty_ = true;
     bool mathSettingsSaveFailed_ = false;
     ScientificDisplay science_;
@@ -216,6 +222,7 @@ void Window::build() {
     button(next, L"Página siguiente  ›", 499, 467, 190, 45, Panel::chat);
     button(424, L"Enviar pregunta", 300, 537, 389, 44, Panel::chat, primary);
     sendButton_ = GetDlgItem(window_, 424);
+    button(conversationHistory, L"Historial", 300, 593, 389, 39, Panel::chat, mutedButton);
 
     label(L"Configuración", 28, 83, 650, 34, Panel::settings, bold_);
     label(L"Combinación para cambiar de modo", 28, 130, 380, 25, Panel::settings);
@@ -236,7 +243,8 @@ void Window::build() {
     SendMessageW(token, EM_SETLIMITTEXT, 256, 0);
     control(L"BUTTON", L"Usar respuesta de demostración local", BS_AUTOCHECKBOX | WS_TABSTOP, demoField,
         28, 413, 585, 31, Panel::settings);
-    settingsStatus_ = label(L"", 28, 465, 660, 36, Panel::settings);
+    button(testConnection, L"Probar conexión", 28, 459, 181, 38, Panel::settings, mutedButton);
+    settingsStatus_ = label(L"", 228, 457, 460, 50, Panel::settings);
     button(cancel, L"Cancelar", 411, 514, 126, 43, Panel::settings, mutedButton);
     button(save, L"Guardar", 546, 514, 143, 43, Panel::settings, primary);
 }
@@ -334,7 +342,13 @@ void Window::refresh() {
         InvalidateRect(window_, &screen, FALSE);
     }
     textIfChanged(lettersButton_, app_.numbers() ? L"123  →  ABC" : L"ABC  →  123");
-    textIfChanged(sendButton_, app_.showingChatReply() ? L"Volver a la pregunta" : L"Enviar pregunta");
+    textIfChanged(sendButton_, app_.readingChatHistory() ? L"Salir del historial" :
+        app_.showingChatReply() ? L"Volver a la pregunta" : L"Enviar pregunta");
+    const bool pending = app_.chatStatus() == ChatStatus::pending;
+    EnableWindow(sendButton_, !pending);
+    const auto historyButton = GetDlgItem(window_, conversationHistory);
+    textIfChanged(historyButton, L"Historial de conversación (" + std::to_wstring(app_.chatHistorySize()) + L")");
+    EnableWindow(historyButton, !pending && app_.chatHistorySize() > 0);
     textIfChanged(hint_, isChat ?
         L"Pulsa varias veces para elegir una letra. Las flechas editan y los botones de página recorren el texto." :
         app_.showingPalette() ? textOf(lcd_.rows[0]) + L"   " + textOf(lcd_.rows[1]) :
@@ -356,9 +370,43 @@ void Window::showSettings() {
     SetDlgItemTextW(window_, urlField, settings_.connection.url.c_str());
     SetDlgItemTextW(window_, tokenField, settings_.connection.token.c_str());
     CheckDlgButton(window_, demoField, settings_.connection.demo ? BST_CHECKED : BST_UNCHECKED);
-    notify(L"");
+    notify(checkingConnection_ ? L"Comprobando HTTPS y token…" : L"");
     refresh();
     SetFocus(GetDlgItem(window_, prefixField));
+}
+
+Connection Window::connectionFromFields() const {
+    return {IsDlgButtonChecked(window_, demoField) == BST_CHECKED,
+            textOf(GetDlgItem(window_, urlField)), textOf(GetDlgItem(window_, tokenField))};
+}
+
+void Window::checkConnection() {
+    checkedConnection_ = connectionFromFields();
+    const auto reply = chat_.check(checkedConnection_, GetTickCount());
+    if (reply.status != ChatStatus::pending) {
+        const std::wstring message(reply.text.begin(), reply.text.end());
+        notify(message.c_str());
+        return;
+    }
+    checkingConnection_ = true;
+    EnableWindow(GetDlgItem(window_, testConnection), FALSE);
+    notify(L"Comprobando HTTPS y token…");
+}
+
+void Window::updateConnectionCheck() {
+    if (!checkingConnection_) return;
+    const auto reply = chat_.pollCheck(GetTickCount());
+    if (reply.status == ChatStatus::pending || reply.status == ChatStatus::idle) return;
+    checkingConnection_ = false;
+    EnableWindow(GetDlgItem(window_, testConnection), TRUE);
+    if (!settingsOpen_) return;
+    const auto current = connectionFromFields();
+    if (current.url != checkedConnection_.url || current.token != checkedConnection_.token) {
+        notify(L"Los datos cambiaron. Vuelve a probar la conexión.");
+        return;
+    }
+    const std::wstring message(reply.text.begin(), reply.text.end());
+    notify(message.c_str());
 }
 
 void Window::storeSettings() {
@@ -371,8 +419,7 @@ void Window::storeSettings() {
     };
     Settings candidate = settings_;
     candidate.shortcut = {selected(prefixField), selected(modeField)};
-    candidate.connection = {IsDlgButtonChecked(window_, demoField) == BST_CHECKED,
-                           textOf(GetDlgItem(window_, urlField)), textOf(GetDlgItem(window_, tokenField))};
+    candidate.connection = connectionFromFields();
     if (!candidate.shortcut.valid()) return notify(L"Selecciona las dos teclas del atajo.");
     if (!candidate.connection.url.empty() && !validUrl(candidate.connection.url)) {
         return notify(L"Introduce una URL HTTPS válida, por ejemplo https://servidor/ask.");
@@ -380,12 +427,19 @@ void Window::storeSettings() {
     if (!candidate.connection.token.empty() && !validToken(candidate.connection.token)) {
         return notify(L"El token debe tener entre 32 y 256 caracteres ASCII sin espacios.");
     }
+    const bool changedConnection = candidate.connection.demo != settings_.connection.demo ||
+        candidate.connection.url != settings_.connection.url || candidate.connection.token != settings_.connection.token;
+    if (changedConnection && app_.chatStatus() == ChatStatus::pending) {
+        return notify(L"Espera a que termine la consulta antes de cambiar la conexión.");
+    }
     if (!candidate.save(settingsFile_)) return notify(L"No se pudo guardar calcu.ini en esta carpeta.");
+    if (changedConnection) app_.resetConversation();
 
     settings_ = std::move(candidate);
     mathSettingsSaveFailed_ = false;
     app_.configureShortcut(settings_.shortcut);
-    chat_.configure(settings_.connection);
+    if (changedConnection) chat_.configure(settings_.connection);
+    app_.tick(GetTickCount());
     command(cancel);
 }
 
@@ -463,6 +517,7 @@ void Window::raw(char key) {
 void Window::command(int id) {
     if (settingsOpen_) {
         if (id == save) storeSettings();
+        if (id == testConnection) checkConnection();
         if (id == cancel) {
             settingsOpen_ = false;
             panelDirty_ = true;
@@ -493,6 +548,7 @@ void Window::command(int id) {
         case 424: action(Action::enter); break;
         case letters: action(Action::paletteOrNumbers); break;
         case commit: action(Action::angleOrCommit); break;
+        case conversationHistory: action(Action::chatHistory); break;
         case previous: action(Action::left); break;
         case next: action(Action::right); break;
         case 425: action(Action::symbol, "Ans"); break;
@@ -560,6 +616,7 @@ LRESULT Window::process(UINT message, WPARAM w, LPARAM l) {
             return 0;
         case WM_TIMER:
             app_.tick(GetTickCount());
+            updateConnectionCheck();
             if (app_.mode() == Mode::chat) refresh();
             return 0;
         case WM_COMMAND: {

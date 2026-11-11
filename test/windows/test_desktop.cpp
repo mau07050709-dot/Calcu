@@ -21,8 +21,32 @@ struct TemporarySettings {
 };
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 3) {
+            const std::string_view url(argv[1]), token(argv[2]);
+            const Connection local{false, {url.begin(), url.end()}, {token.begin(), token.end()}};
+            DesktopChat chat;
+            check(chat.check(local, GetTickCount()).status == ChatStatus::pending, "Sonda TLS asincrona");
+            ChatReply reply{ChatStatus::pending, {}};
+            while (reply.status == ChatStatus::pending) {
+                Sleep(20);
+                reply = chat.pollCheck(GetTickCount());
+            }
+            check(reply.status == ChatStatus::error && reply.text == "Certificado TLS",
+                  "WinHTTP rechaza un certificado sin confianza");
+            chat.configure(local);
+            check(chat.startWithHistory("PRUEBA", {{"ANTERIOR", "RESPUESTA"}}, GetTickCount()).status ==
+                  ChatStatus::pending, "POST TLS asincrono");
+            do {
+                Sleep(20);
+                reply = chat.poll(GetTickCount());
+            } while (reply.status == ChatStatus::pending);
+            check(reply.status == ChatStatus::error && reply.text == "Certificado TLS",
+                  "El POST tampoco omite la validacion");
+            std::cout << "OK: WinHTTP rechaza TLS sin confianza en GET y POST\n";
+            return 0;
+        }
         const TemporarySettings test(std::filesystem::temp_directory_path() /
             (L"calcu-settings-" + std::to_wstring(GetCurrentProcessId()) + L".ini"));
         const Settings initial = Settings::load(test.file.wstring());
@@ -54,6 +78,7 @@ int main() {
 
         DesktopChat chat;
         check(chat.start("HOLA", 1).status == ChatStatus::error, "Aviso sin servidor");
+        check(chat.check({}, 1).status == ChatStatus::error, "Sonda avisa si falta configuracion");
         chat.configure(restored.connection);
         check(chat.start("HOLA", 5).status == ChatStatus::pending, "Demostracion asincrona");
         check(chat.poll(304).status == ChatStatus::pending, "Espera de demostracion");

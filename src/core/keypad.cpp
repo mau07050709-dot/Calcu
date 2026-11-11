@@ -42,8 +42,18 @@ KeyEvent Keypad::press(char key, uint32_t now) {
             case '4': return {Action::erase};
             case '5': return {Action::clear};
             case '6': return {Action::angleOrCommit};
-            default: return {};
+            default: break;
         }
+        constexpr std::array<char, 4> available{'7', '8', '9', '0'};
+        constexpr std::array<Action, 3> actions{Action::cursorLeft, Action::cursorRight, Action::chatHistory};
+        std::size_t index = 0;
+        for (const char candidate : available) {
+            if (candidate == shortcut_.mode) continue;
+            if (index == actions.size()) break;
+            if (key == candidate) return {actions[index]};
+            ++index;
+        }
+        return {};
     }
     if (key == shortcut_.prefix) {
         prefixPending_ = true;

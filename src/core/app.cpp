@@ -230,6 +230,29 @@ void App::calculator(KeyEvent key) {
     }
 }
 
+void App::resetConversation() {
+    if (chatStatus_ == ChatStatus::pending) return;
+    chatHistory_.clear();
+    chatHistoryOffset_ = -1;
+    transcriptPages_.set({});
+    chatPages_.set({});
+    chatStatus_ = ChatStatus::idle;
+    showingChat_ = false;
+    redraw_ = true;
+}
+
+void App::browseChatHistory() {
+    if (chatHistory_.empty()) return;
+    chatHistoryOffset_ = (chatHistoryOffset_ + 1) % static_cast<int>(chatHistory_.size());
+    const auto& turn = chatHistory_[chatHistory_.size() - 1 - chatHistoryOffset_];
+    auto heading = "Hist " + std::to_string(chatHistoryOffset_ + 1) + "/" +
+        std::to_string(chatHistory_.size());
+    heading.resize(lcdWidth, ' ');
+    auto question = "TU: " + turn.question;
+    question.resize(((question.size() + lcdWidth - 1) / lcdWidth) * lcdWidth, ' ');
+    transcriptPages_.set(heading + question + "GPT: " + turn.answer);
+}
+
 void App::applyReply(ChatReply reply) {
     if (reply.status == ChatStatus::pending || reply.status == ChatStatus::idle) return;
     chatStatus_ = reply.status;
@@ -240,13 +263,32 @@ void App::applyReply(ChatReply reply) {
         heading.resize(lcdWidth, ' ');
         chatPages_.set(heading + reply.text);
     } else {
+        reply.text.resize(std::min(reply.text.size(), config::answerLimit));
+        const auto& draft = question_.text();
+        const auto first = draft.find_first_not_of(' ');
+        if (first != std::string::npos) {
+            if (chatHistory_.size() == config::chatHistoryLimit) chatHistory_.erase(chatHistory_.begin());
+            chatHistory_.push_back({draft.substr(first, draft.find_last_not_of(' ') - first + 1), reply.text});
+        }
         question_.clear();
-        chatPages_.set(reply.text.substr(0, config::answerLimit));
+        chatPages_.set(reply.text);
     }
 }
 
 void App::conversation(KeyEvent key, uint32_t now) {
     if (chatStatus_ == ChatStatus::pending || key.action == Action::none) return;
+    if (key.action == Action::chatHistory) {
+        browseChatHistory();
+        return;
+    }
+    if (readingChatHistory()) {
+        if (key.action == Action::left || key.action == Action::right) {
+            transcriptPages_.move(key.action == Action::left ? -1 : 1);
+            return;
+        }
+        chatHistoryOffset_ = -1;
+        if (key.action == Action::enter || key.action == Action::erase) return;
+    }
 
     if (showingChat_) {
         if (key.action == Action::left || key.action == Action::right) {
@@ -279,7 +321,7 @@ void App::conversation(KeyEvent key, uint32_t now) {
         case Action::enter:
             question_.commit();
             if (question_.text().find_first_not_of(' ') != std::string::npos) {
-                auto reply = chat_.start(question_.text(), now);
+                auto reply = chat_.startWithHistory(question_.text(), chatHistory_, now);
                 if (reply.status == ChatStatus::pending) chatStatus_ = ChatStatus::pending;
                 applyReply(std::move(reply));
             }
@@ -299,6 +341,7 @@ Frame App::calculatorFrame() const {
 
 Frame App::chatFrame() const {
     if (chatStatus_ == ChatStatus::pending) return {"ChatGPT", "Consultando..."};
+    if (readingChatHistory()) return transcriptPages_.frame();
     if (showingChat_) return chatPages_.frame();
     if (reviewingQuestion_) return questionPages_.frame();
     return editor(question_.numbers() ? "ChatGPT 123" : "ChatGPT ABC",
@@ -308,7 +351,7 @@ Frame App::chatFrame() const {
 void App::render() {
     auto frame = mode_ == Mode::calculator ? calculatorFrame() : chatFrame();
     if (mode_ == Mode::chat && chatStatus_ != ChatStatus::pending &&
-        !showingChat_ && question_.text().empty()) {
+        !showingChat_ && !readingChatHistory() && question_.text().empty()) {
         frame[1] = chat_.connectionLabel();
     }
     if (keypad_.shortcutPending()) {

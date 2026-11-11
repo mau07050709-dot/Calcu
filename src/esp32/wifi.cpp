@@ -42,7 +42,13 @@ bool Wifi::ready() const {
 
 const char* Wifi::label() const {
     if (!configured_) return "WiFi sin config.";
-    if (!connected()) return "Conectando WiFi";
+    if (!connected()) {
+        switch (WiFi.status()) {
+            case WL_NO_SSID_AVAIL: return "Red no hallada";
+            case WL_CONNECT_FAILED: return "WiFi no conecta";
+            default: return "Conectando WiFi";
+        }
+    }
     return ready() ? "WiFi listo" : "Ajustando reloj";
 }
 }

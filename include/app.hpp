@@ -39,6 +39,9 @@ public:
     bool numbers() const { return question_.numbers(); }
     bool showingChatReply() const { return showingChat_; }
     ChatStatus chatStatus() const { return chatStatus_; }
+    std::size_t chatHistorySize() const { return chatHistory_.size(); }
+    bool readingChatHistory() const { return chatHistoryOffset_ >= 0; }
+    void resetConversation();
     void tick(uint32_t now);
     Mode mode() const { return mode_; }
 
@@ -47,6 +50,7 @@ private:
     void calculator(KeyEvent key);
     void conversation(KeyEvent key, uint32_t now);
     void applyReply(ChatReply reply);
+    void browseChatHistory();
     void insert(std::string_view token);
     void showMathResult(const Evaluation& result, std::string_view source);
     void showHistory(const MathEntry& entry);
@@ -78,6 +82,9 @@ private:
     ChatStatus chatStatus_ = ChatStatus::idle;
     Pages chatPages_;
     bool showingChat_ = false;
+    ChatHistory chatHistory_;
+    int chatHistoryOffset_ = -1;
+    Pages transcriptPages_;
     Pages questionPages_;
     bool reviewingQuestion_ = false;
     bool redraw_ = true;

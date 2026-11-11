@@ -7,7 +7,7 @@
 
 namespace calcu {
 enum class Action { none, digit, enter, mode, paletteOrNumbers, left, right,
-                    erase, clear, angleOrCommit, symbol, cursorLeft, cursorRight, resultFormat, historyOlder, historyNewer };
+                    erase, clear, angleOrCommit, symbol, cursorLeft, cursorRight, resultFormat, historyOlder, historyNewer, chatHistory };
 
 struct KeyEvent {
     Action action = Action::none;

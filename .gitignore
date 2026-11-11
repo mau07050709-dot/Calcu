@@ -1,6 +1,7 @@
 *.exe
 calcu.ini
 *.tmp
+*.bak
 *.log
 .pio/
 .vscode/
@@ -10,9 +11,11 @@ __pycache__/
 .pytest_cache/
 .env
 .env.*
-!.env.example
 *.key
 *.pem
 *.pfx
+*.p12
+*.crt
+*.cer
 server/Caddyfile
 include/local_config.hpp

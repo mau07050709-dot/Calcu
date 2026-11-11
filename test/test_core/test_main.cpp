@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "config.hpp"
+#include "hardware_profile.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -171,11 +172,17 @@ public:
 class FakeChat : public Chat {
 public:
     std::string sent;
+    ChatHistory sentHistory;
     ChatStatus next = ChatStatus::answer;
 
     ChatReply start(std::string_view question, uint32_t) override {
         sent.assign(question);
         return {ChatStatus::pending, {}};
+    }
+
+    ChatReply startWithHistory(std::string_view question, const ChatHistory& history, uint32_t now) override {
+        sentHistory = history;
+        return start(question, now);
     }
 
     ChatReply poll(uint32_t now) override {
@@ -237,6 +244,79 @@ void scientificSession() {
     check(app.expression().size() == 32 && display.frame[1].back() == '|', "LCD sigue el cursor largo");
     app.moveMathCursor(1, ++time);
     check(display.frame[1][1] == '|', "LCD permite volver al inicio");
+}
+
+void hardwareProfiles() {
+    auto output = +[](int pin) { return pin >= 0 && pin < 28; };
+    auto input = +[](int pin) { return pin >= 0 && pin < 32; };
+    config::Hardware profile;
+    auto result = validateHardware(profile, output, input);
+    check(result.keypad && result.lcd, "El perfil inicial permite serie sin GPIO");
+    profile.matrixEnabled = true;
+    profile.rows = {0, 1, 2, 3};
+    profile.columns = {4, 5, 6};
+    profile.lcdController = config::LcdController::hd44780Parallel;
+    profile.lcdRs = 10;
+    profile.lcdEnable = 11;
+    profile.lcdData = {12, 13, 14, 15};
+    result = validateHardware(profile, output, input);
+    check(result.keypad && result.lcd, "Validacion con pines sinteticos independientes");
+    profile.lcdData[0] = 1;
+    result = validateHardware(profile, output, input);
+    check(!result.keypad && !result.lcd, "Rechaza colision de buses");
+    profile.lcdData[0] = 12;
+    profile.columns[0] = 30;
+    check(!validateHardware(profile, output, input).keypad, "Rechaza columna sin pull-up interno");
+    profile.matrixInternalPullups = false;
+    check(validateHardware(profile, output, input).keypad, "Admite pull-up externo");
+    profile.keys[0] = profile.keys[1];
+    profile.lcdRowAddresses[1] = 0x08;
+    result = validateHardware(profile, output, input);
+    check(!result.keypad && !result.lcd, "Rechaza mapa repetido y filas LCD solapadas");
+}
+
+void conversationContext() {
+    RecordingDisplay display;
+    FakeChat chat;
+    App app(display, chat);
+    uint32_t now = 2010;
+    auto press = [&](std::string_view keys) {
+        for (char key : keys) app.press(key, now += 30);
+    };
+    press("*#23*7*42#");
+    check(chat.sent == "AD" && chat.sentHistory.empty(), "Corrige en medio con teclado fisico");
+    check(app.chatHistorySize() == 1, "Guarda primer turno completo");
+    press("#4#");
+    check(chat.sent == "G" && chat.sentHistory.size() == 1 &&
+          chat.sentHistory[0].question == "AD", "Seguimiento incluye pregunta y respuesta");
+    press("*9");
+    check(display.frame[0].find("Hist 1/2") == 0 &&
+          display.frame[1].find("TU: G") == 0, "LCD muestra el turno reciente");
+    press("*3");
+    check(display.frame[0].find("GPT: ") == 0, "LCD recorre una respuesta del historial");
+    press("*9");
+    check(display.frame[1].find("TU: AD") == 0, "Segundo atajo consulta turno anterior");
+    press("##");
+    chat.next = ChatStatus::error;
+    press("5#");
+    check(app.chatHistorySize() == 2, "Fallo de red no se incorpora al contexto");
+    press("#");
+    check(display.frame[1].find("J|") == 0, "El error conserva el borrador");
+    chat.next = ChatStatus::answer;
+    press("#");
+    for (int i = 0; i < 4; ++i) press("#2#");
+    check(app.chatHistorySize() == config::chatHistoryLimit &&
+          chat.sentHistory.front().question != "AD", "Limita y rota el contexto");
+    app.resetConversation();
+    check(app.chatHistorySize() == 0 && !app.readingChatHistory(), "Cambio de conexion limpia contexto");
+    check(app.configureShortcut({'#', '7'}), "Atajo configurable");
+    press("#7#7");
+    check(app.mode() == Mode::chat, "Modo funciona con sufijo reservado por el usuario");
+    press("23#8#42*");
+    check(chat.sent == "AD" && chat.sentHistory.empty(), "Cursor y contexto siguen disponibles con otro atajo");
+    check(chatRequestJson("A\"B", {{ "X\\Y", "OK" }}) ==
+          R"({"question":"A\"B","history":[{"question":"X\\Y","answer":"OK"}]})",
+          "Serializacion JSON compartida");
 }
 
 void modesAndDisplay() {
@@ -313,6 +393,8 @@ int main() {
     mathematics();
     scientificMath();
     scientificSession();
+    hardwareProfiles();
+    conversationContext();
     multitap();
     modesAndDisplay();
     std::cout << "OK: motor matematico, multitap, modos y LCD\n";

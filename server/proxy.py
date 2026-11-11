@@ -1,8 +1,10 @@
-"""Intermediario HTTP local para publicar detrás de un proxy TLS."""
+"""Intermediario de Calcu con TLS directo opcional y contexto de sesión."""
 import hmac
+import http.client
 import json
 import os
 import socket
+import ssl
 import unicodedata
 import urllib.error
 import urllib.request
@@ -10,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 QUESTION_LIMIT = 240
 ANSWER_LIMIT = 768
+HISTORY_LIMIT = 4
+REQUEST_LIMIT = 12288
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
 
@@ -35,10 +39,25 @@ def lcd_text(text):
     return text if len(text) <= ANSWER_LIMIT else text[:ANSWER_LIMIT - 3].rstrip() + "..."
 
 
-def openai_answer(question, api_key, model):
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+openai_http = urllib.request.build_opener(NoRedirect)
+
+
+def openai_answer(question, api_key, model, history=()):
+    messages = []
+    for turn in history:
+        messages.extend((
+            {"role": "user", "content": turn["question"]},
+            {"role": "assistant", "content": turn["answer"]},
+        ))
+    messages.append({"role": "user", "content": question})
     payload = {
         "model": model,
-        "input": question,
+        "input": messages,
         "instructions": (
             "Responde en español de forma breve, en texto plano, sin Markdown. "
             "La respuesta se mostrará en una LCD de 16 columnas. "
@@ -54,13 +73,13 @@ def openai_answer(question, api_key, model):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
+        with openai_http.open(request, timeout=25) as response:
             raw = response.read(65537)
         if len(raw) > 65536:
             raise ServiceError(502, "Respuesta de OpenAI demasiado grande")
         data = json.loads(raw)
     except urllib.error.HTTPError as exc:
-        status = 429 if exc.code == 429 else 502
+        status = 429 if exc.code == 429 else 424 if exc.code in (400, 401, 403, 404) else 502
         exc.close()
         raise ServiceError(status, "OpenAI rechazó la consulta") from None
     except urllib.error.URLError as exc:
@@ -68,7 +87,7 @@ def openai_answer(question, api_key, model):
         raise ServiceError(status, "No se pudo conectar con OpenAI") from None
     except TimeoutError:
         raise ServiceError(504, "Tiempo de espera de OpenAI") from None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         raise ServiceError(502, "Respuesta de OpenAI inválida") from None
 
     try:
@@ -93,6 +112,23 @@ def openai_answer(question, api_key, model):
     return answer
 
 
+def bounded_text(value, limit):
+    return isinstance(value, str) and 0 < len(value) <= limit and bool(value.strip())
+
+
+def read_turns(payload):
+    if not isinstance(payload, dict) or not bounded_text(payload.get("question"), QUESTION_LIMIT):
+        raise ServiceError(400, "Pregunta inválida")
+    history = payload.get("history", [])
+    if not isinstance(history, list) or len(history) > HISTORY_LIMIT:
+        raise ServiceError(400, "Historial inválido")
+    for turn in history:
+        if not isinstance(turn, dict) or not bounded_text(turn.get("question"), QUESTION_LIMIT) \
+                or not bounded_text(turn.get("answer"), ANSWER_LIMIT):
+            raise ServiceError(400, "Turno de historial inválido")
+    return payload["question"].strip(), history
+
+
 def handler_for(device_token, ask):
     expected = ("Bearer " + device_token).encode("ascii")
 
@@ -100,6 +136,12 @@ def handler_for(device_token, ask):
         def setup(self):
             self.request.settimeout(5)
             super().setup()
+
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionResetError, ssl.SSLError):
+                pass
 
         def send_json(self, status, payload):
             body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
@@ -110,49 +152,112 @@ def handler_for(device_token, ask):
             self.end_headers()
             self.wfile.write(body)
 
-        def do_POST(self):
+        def log_message(self, format, *args):
+            # Las rutas y las cabeceras de clientes nunca van al registro.
+            pass
+
+        def authorize(self):
+            supplied = self.headers.get("Authorization", "").encode("latin1")
+            if not hmac.compare_digest(supplied, expected):
+                raise ServiceError(401, "Token inválido")
+
+        def health(self):
+            if self.path != "/health":
+                raise ServiceError(404, "Ruta desconocida")
+            self.authorize()
+            return {"service": "calcu", "ready": True}
+
+        def question(self):
+            if self.path != "/ask":
+                raise ServiceError(404, "Ruta desconocida")
+            self.authorize()
+            if self.headers.get_content_type() != "application/json":
+                raise ServiceError(415, "Se requiere JSON")
             try:
-                if self.path != "/ask":
-                    raise ServiceError(404, "Ruta desconocida")
-                supplied = self.headers.get("Authorization", "").encode("latin1")
-                if not hmac.compare_digest(supplied, expected):
-                    raise ServiceError(401, "Token inválido")
-                if self.headers.get_content_type() != "application/json":
-                    raise ServiceError(415, "Se requiere JSON")
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= size <= REQUEST_LIMIT:
+                    raise ServiceError(413, "Longitud inválida")
+                raw = self.rfile.read(size)
+                if len(raw) != size:
+                    raise ServiceError(400, "Cuerpo incompleto")
+                payload = json.loads(raw)
+            except (ValueError, RecursionError):
+                raise ServiceError(400, "JSON inválido") from None
+            except socket.timeout:
+                raise ServiceError(408, "Tiempo de espera del cliente") from None
+            question, history = read_turns(payload)
+            return {"answer": ask(question, history)}
+
+        def respond(self, method):
+            try:
                 try:
-                    size = int(self.headers.get("Content-Length", "0"))
-                    if not 1 <= size <= 2048:
-                        raise ServiceError(413, "Longitud inválida")
-                    payload = json.loads(self.rfile.read(size))
-                    question = payload.get("question") if isinstance(payload, dict) else None
-                except ValueError:
-                    raise ServiceError(400, "JSON inválido") from None
-                except socket.timeout:
-                    raise ServiceError(408, "Tiempo de espera del cliente") from None
-                if not isinstance(question, str) or not question.strip() or len(question) > QUESTION_LIMIT:
-                    raise ServiceError(400, "Pregunta inválida")
-                self.send_json(200, {"answer": ask(question.strip())})
-            except ServiceError as exc:
-                self.send_json(exc.status, {"error": str(exc)})
-            except (BrokenPipeError, ConnectionResetError):
+                    payload = method()
+                    self.send_json(200, payload)
+                except ServiceError as exc:
+                    self.send_json(exc.status, {"error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
 
+        def do_GET(self):
+            self.respond(self.health)
+
+        def do_POST(self):
+            self.respond(self.question)
+
     return Handler
+
+
+class TlsServer(HTTPServer):
+    def __init__(self, address, handler, tls):
+        self.tls = tls
+        super().__init__(address, handler)
+
+    def get_request(self):
+        sock, address = super().get_request()
+        if self.tls is None:
+            return sock, address
+        sock.settimeout(5)
+        try:
+            return self.tls.wrap_socket(sock, server_side=True), address
+        except OSError:
+            sock.close()
+            raise
+
+
+def tls_context(cert, private_key):
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls.load_cert_chain(cert, private_key, password=lambda: "")
+    return tls
 
 
 def main():
     key = os.environ.get("OPENAI_API_KEY", "")
     model = os.environ.get("OPENAI_MODEL", "")
     token = os.environ.get("CALCU_DEVICE_TOKEN", "")
-    if not key or not model or len(token) < 32 or not all("!" <= c <= "~" for c in token):
-        raise SystemExit(
-            "Configura OPENAI_API_KEY, OPENAI_MODEL y CALCU_DEVICE_TOKEN "
-            "(32 caracteres ASCII imprimibles como mínimo, sin espacios)."
-        )
-    port = int(os.environ.get("CALCU_PORT", "8080"))
-    with HTTPServer(("127.0.0.1", port), handler_for(token, lambda q: openai_answer(q, key, model))) as server:
-        print(f"Calcu escuchando en 127.0.0.1:{port}", flush=True)
-        server.serve_forever()
+    missing = [name for name, value in (("OPENAI_API_KEY", key), ("OPENAI_MODEL", model),
+                                      ("CALCU_DEVICE_TOKEN", token)) if not value]
+    if missing:
+        raise SystemExit("Falta configurar " + ", ".join(missing))
+    if not 32 <= len(token) <= 256 or not all("!" <= c <= "~" for c in token):
+        raise SystemExit("CALCU_DEVICE_TOKEN debe tener de 32 a 256 caracteres ASCII sin espacios.")
+
+    cert, private_key = (os.environ.get(name, "") for name in ("CALCU_TLS_CERT", "CALCU_TLS_KEY"))
+    if bool(cert) != bool(private_key):
+        raise SystemExit("Configura CALCU_TLS_CERT y CALCU_TLS_KEY juntos.")
+    bind = os.environ.get("CALCU_BIND", "127.0.0.1")
+    if not cert and bind != "127.0.0.1":
+        raise SystemExit("El modo HTTP local solo escucha en 127.0.0.1. Configura TLS para otra interfaz.")
+    try:
+        tls = tls_context(cert, private_key) if cert else None
+        port = int(os.environ.get("CALCU_PORT", "8443" if tls else "8080"))
+        with TlsServer((bind, port), handler_for(token, lambda q, turns: openai_answer(q, key, model, turns)),
+                       tls) as server:
+            print(f"Calcu escuchando en {bind}:{server.server_port} ({'HTTPS' if tls else 'HTTP local'})",
+                  flush=True)
+            server.serve_forever()
+    except (ValueError, OverflowError, OSError):
+        raise SystemExit("No se pudo iniciar Calcu. Revisa puerto, interfaz y archivos TLS.") from None
 
 
 if __name__ == "__main__":

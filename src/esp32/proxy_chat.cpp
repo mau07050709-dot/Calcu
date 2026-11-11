@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <utility>
 
 namespace calcu {
@@ -53,7 +55,7 @@ const char* ProxyChat::connectionLabel() const {
 
 void ProxyChat::begin() {
     if (!configured()) return;
-    requests_ = xQueueCreate(1, sizeof(Request));
+    requests_ = xQueueCreate(1, sizeof(std::string*));
     results_ = xQueueCreate(1, sizeof(Result));
     if (requests_ && results_ &&
         xTaskCreate(run, "Calcu HTTPS", 12288, this, 1, nullptr) == pdPASS) return;
@@ -63,6 +65,10 @@ void ProxyChat::begin() {
 }
 
 ChatReply ProxyChat::start(std::string_view question, uint32_t now) {
+    return startWithHistory(question, {}, now);
+}
+
+ChatReply ProxyChat::startWithHistory(std::string_view question, const ChatHistory& history, uint32_t now) {
     if (!configured()) return error("Configura proxy");
     if (!wifi_.ready()) return error(wifi_.label());
     if (!requests_) return error("HTTPS no iniciado");
@@ -75,9 +81,13 @@ ChatReply ProxyChat::start(std::string_view question, uint32_t now) {
     }
 
     if (question.size() > config::questionLimit) return error("Pregunta extensa");
-    Request request{};
-    std::copy(question.begin(), question.end(), request.question);
-    if (xQueueSend(requests_, &request, 0) != pdTRUE) return error("Espera a la red");
+    auto body = std::unique_ptr<std::string>(new (std::nothrow) std::string(chatRequestJson(question, history)));
+    if (!body) return error("Memoria escasa");
+    auto* request = body.release();
+    if (xQueueSend(requests_, &request, 0) != pdTRUE) {
+        delete request;
+        return error("Espera a la red");
+    }
 
     startedAt_ = now;
     busy_ = true;
@@ -99,9 +109,10 @@ ChatReply ProxyChat::poll(uint32_t now) {
 void ProxyChat::run(void* context) {
     auto& self = *static_cast<ProxyChat*>(context);
     for (;;) {
-        Request request{};
+        std::string* request = nullptr;
         if (xQueueReceive(self.requests_, &request, portMAX_DELAY) != pdTRUE) continue;
-        auto reply = self.ask(request.question);
+        std::unique_ptr<std::string> body(request);
+        auto reply = self.ask(*body);
         Result result{};
         result.status = reply.status;
         reply.text.copy(result.text, config::answerLimit);
@@ -109,7 +120,7 @@ void ProxyChat::run(void* context) {
     }
 }
 
-ChatReply ProxyChat::ask(const char* question) const {
+ChatReply ProxyChat::ask(std::string& body) const {
     WiFiClientSecure socket;
     socket.setCACert(net.rootCa);
     socket.setHandshakeTimeout(8);
@@ -119,24 +130,22 @@ ChatReply ProxyChat::ask(const char* question) const {
     http.useHTTP10(true);
     if (!http.begin(socket, net.proxyUrl)) return error("URL HTTPS invalida");
 
-    JsonDocument input;
-    input["question"] = question;
-    String body;
-    serializeJson(input, body);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", String("Bearer ") + net.deviceToken);
-    const int status = http.POST(body);
+    const int status = http.POST(reinterpret_cast<uint8_t*>(body.data()), body.size());
     if (status == 401 || status == 403) return error("Token rechazado");
+    if (status == 424) return error("Clave/modelo API");
+    if (status == 404) return error("Ruta del proxy");
     if (status == 429 || status == 503) return error("Servidor ocupado");
     if (status == 504 || status == HTTPC_ERROR_READ_TIMEOUT) return error("Tiempo de espera");
     if (status < 0) return error("Fallo de red/TLS");
     if (status != 200) return error("Error del proxy");
 
     const int length = http.getSize();
-    if (length <= 0 || length > bodyLimit) return error("Longitud invalida");
+    if (length == 0 || length > bodyLimit) return error("Longitud invalida");
     ResponseBuffer response;
     const int received = http.writeToStream(&response);
-    if (received != length || response.size != static_cast<std::size_t>(length)) {
+    if (received <= 0 || (length >= 0 && received != length) || response.size != static_cast<std::size_t>(received)) {
         return error("Respuesta incompleta");
     }
 
