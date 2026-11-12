@@ -51,6 +51,16 @@ class OpenAIContract(unittest.TestCase):
                     openai_answer("Prueba", "api-test", "test-model")
             self.assertEqual(failure.exception.status, expected)
 
+    def test_distinguishes_insufficient_quota_from_rate_limit(self):
+        for code, expected in (("insufficient_quota", 402), ("credit_balance_exhausted", 402),
+                               ("project_spend_limit_exceeded", 402), ("rate_limit_exceeded", 429)):
+            body = io.BytesIO(json.dumps({"error": {"code": code}}).encode())
+            issue = urllib.error.HTTPError("https://example.invalid", 429, "", {}, body)
+            with patch("proxy.openai_http.open", side_effect=issue):
+                with self.assertRaises(ServiceError) as failure:
+                    openai_answer("Prueba", "api-test", "model-test")
+            self.assertEqual(failure.exception.status, expected)
+
     def test_verification_requires_generated_text_and_configuration(self):
         with patch("proxy.openai_http.open") as call:
             with self.assertRaises(ServiceError) as missing:

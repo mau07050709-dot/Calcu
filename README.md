@@ -118,7 +118,7 @@ Sustituye `COM5` por el puerto real. [Documentación de carga de PlatformIO](htt
 
 Windows cifra la clave con DPAPI para la cuenta actual y la guarda en `%LOCALAPPDATA%\Calcu\openai.dpapi`. El servidor la lee al consultar OpenAI. Si el proceso se inicia con `OPENAI_API_KEY`, esa variable tiene prioridad. El modelo local por defecto es `gpt-6-luna`, que admite Responses API y está orientado a tareas breves con bajo costo. Para usar otro modelo habilitado en tu proyecto, define `OPENAI_MODEL` antes de abrir Calcu. [Modelo GPT‑6 Luna en OpenAI Docs](https://developers.openai.com/api/docs/models/gpt-6-luna)
 
-El enlace local usa HTTP directo solo en `127.0.0.1`. El servidor enlaza únicamente esa dirección y protege las consultas con el token de la sesión. La conexión del servidor a OpenAI sigue siendo HTTPS. Si el diagnóstico indica cuota o límite, revisa los créditos y límites del proyecto de API. El diagnóstico no añade turnos al historial.
+El enlace local usa HTTP directo solo en `127.0.0.1`. El servidor enlaza únicamente esa dirección y protege las consultas con el token de la sesión. La conexión del servidor a OpenAI sigue siendo HTTPS. Si aparece **Cuota agotada**, revisa la facturación y los créditos del proyecto de API. **Límite de API** indica que debes esperar y volver a intentar o revisar los límites del proyecto. [Errores de OpenAI API](https://developers.openai.com/api/docs/guides/error-codes) El diagnóstico no añade turnos al historial.
 
 ## Activar ChatGPT con un intermediario HTTPS externo
 
@@ -159,7 +159,7 @@ python -B -m unittest discover -s server -v
 - Python prueba el contrato HTTP en localhost y la conversión de respuestas con una llamada a OpenAI simulada.
 - El recorrido de consola anterior verifica la calculadora, multitap, el LCD y la respuesta paginada desde el punto de entrada normal.
 
-La Fase 6 volvió a compilar el perfil provisional `esp32dev` y pasó la suite C++ y las diez pruebas de Python. La prueba `test/windows/test_desktop.cpp` comprueba la persistencia de atajo, ángulo y conexión, el cifrado del token, la validación de URL y la respuesta de demostración. Para repetirla con un compilador compatible disponible como `g++` (o reemplázalo por `clang++`):
+La Fase 6 volvió a compilar el perfil provisional `esp32dev` y pasó la suite C++ y las once pruebas de Python. La prueba `test/windows/test_desktop.cpp` comprueba la persistencia de atajo, ángulo y conexión, el cifrado del token, la validación de URL y la respuesta de demostración. Para repetirla con un compilador compatible disponible como `g++` (o reemplázalo por `clang++`):
 
 ```powershell
 g++ -std=c++17 -I include -I src/windows test/windows/test_desktop.cpp src/windows/settings.cpp src/windows/desktop_chat.cpp src/core/chat.cpp -static -lwinhttp -lcrypt32 -o "$env:TEMP/calcu-test.exe"

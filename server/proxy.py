@@ -19,6 +19,13 @@ ANSWER_LIMIT = 768
 HISTORY_LIMIT = 4
 REQUEST_LIMIT = 12288
 OPENAI_URL = "https://api.openai.com/v1/responses"
+BILLING_ERRORS = {
+    "credit_balance_exhausted": "El saldo de créditos de OpenAI está agotado",
+    "organization_spend_limit_exceeded": "Se alcanzó el límite de gasto de la organización",
+    "project_spend_limit_exceeded": "Se alcanzó el límite de gasto del proyecto",
+    "organization_usage_limit_exceeded": "Se alcanzó el límite de uso de la organización",
+    "insufficient_quota": "Cuota insuficiente en el proyecto de OpenAI",
+}
 
 
 class ServiceError(Exception):
@@ -87,7 +94,18 @@ def openai_answer(question, api_key, model, history=(), *, verify=False):
         data = json.loads(raw)
     except urllib.error.HTTPError as exc:
         status = 429 if exc.code == 429 else 424 if exc.code in (400, 401, 403, 404) else 502
+        billing = None
+        if status == 429:
+            try:
+                error = json.loads(exc.read(8192)).get("error", {})
+                billing = BILLING_ERRORS.get(error.get("code"))
+                if not billing and error.get("type") == "insufficient_quota":
+                    billing = BILLING_ERRORS["insufficient_quota"]
+            except (AttributeError, TypeError, ValueError, OSError, http.client.HTTPException):
+                pass
         exc.close()
+        if billing:
+            raise ServiceError(402, billing) from None
         raise ServiceError(status, "OpenAI rechazó la consulta. Revisa el proyecto, modelo o cuota") from None
     except urllib.error.URLError as exc:
         status = 504 if isinstance(exc.reason, TimeoutError) else 502

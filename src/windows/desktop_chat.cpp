@@ -140,7 +140,8 @@ ChatReply request(const Connection& connection, std::string body, Request kind) 
     if (code == 424) return error("Clave/modelo API");
     if (code == 503) return error(connection.loopback && kind == Request::ask ? "Clave API falta" :
         "Revisa clave y modelo en el servidor.");
-    if (code == 429) return error("Revisa cuota o limite de OpenAI.");
+    if (code == 402) return error(kind == Request::ask ? "Cuota agotada" : "Revisa los creditos del proyecto de OpenAI.");
+    if (code == 429) return error(kind == Request::ask ? "Limite de API" : "Limite temporal de OpenAI.");
     if (code == 504) return error("Tiempo de espera");
     if (code == 404) return error("Ruta del proxy");
     if (code != 200) return error("Error del proxy");

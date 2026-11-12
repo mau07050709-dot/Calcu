@@ -137,7 +137,8 @@ ChatReply ProxyChat::ask(std::string& body) const {
     if (status == 401 || status == 403) return error("Token rechazado");
     if (status == 424) return error("Clave/modelo API");
     if (status == 404) return error("Ruta del proxy");
-    if (status == 429) return error("Cuota de API");
+    if (status == 402) return error("Cuota agotada");
+    if (status == 429) return error("Limite de API");
     if (status == 503) return error("API sin config.");
     if (status == 504 || status == HTTPC_ERROR_READ_TIMEOUT) return error("Tiempo de espera");
     if (status < 0) return error("Fallo de red/TLS");
