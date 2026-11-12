@@ -16,9 +16,10 @@ struct Endpoint {
     std::wstring host;
     std::wstring path;
     INTERNET_PORT port = 0;
+    bool secure = true;
 };
 
-Endpoint parseUrl(const std::wstring& url) {
+Endpoint parseUrl(const std::wstring& url, bool loopback = false) {
     if (url.find(L'#') != std::wstring::npos || url.find(L'\\') != std::wstring::npos ||
         std::any_of(url.begin(), url.end(), [](wchar_t c) { return c <= L' '; })) return {};
     URL_COMPONENTS parts{};
@@ -26,10 +27,13 @@ Endpoint parseUrl(const std::wstring& url) {
     parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
         parts.dwUserNameLength = parts.dwPasswordLength = DWORD(-1);
     if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &parts) ||
-        parts.nScheme != INTERNET_SCHEME_HTTPS || parts.dwHostNameLength == 0 ||
+        parts.nScheme != (loopback ? INTERNET_SCHEME_HTTP : INTERNET_SCHEME_HTTPS) ||
+        parts.dwHostNameLength == 0 ||
         parts.dwUserNameLength != 0 || parts.dwPasswordLength != 0) return {};
     Endpoint result;
     result.host.assign(parts.lpszHostName, parts.dwHostNameLength);
+    if (loopback && result.host != L"127.0.0.1") return {};
+    result.secure = !loopback;
     if (parts.dwUrlPathLength) result.path.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
     if (result.path.empty()) result.path = L"/";
     if (parts.dwExtraInfoLength) result.path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
@@ -96,7 +100,7 @@ std::string answerFromJson(std::string_view json) {
 enum class Request { ask, live, health, verify };
 
 ChatReply request(const Connection& connection, std::string body, Request kind) {
-    auto endpoint = parseUrl(connection.url);
+    auto endpoint = parseUrl(connection.url, connection.loopback);
     if (endpoint.host.empty()) return error("URL HTTPS invalida");
     if (kind != Request::ask) {
         endpoint.path = endpoint.path.substr(0, endpoint.path.find(L'?'));
@@ -108,7 +112,7 @@ ChatReply request(const Connection& connection, std::string body, Request kind) 
         endpoint.path.replace(endpoint.path.size() - 3, 3,
             kind == Request::live ? L"live" : kind == Request::health ? L"health" : L"verify");
     }
-    InternetHandle session(WinHttpOpen(L"Calcu/2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    InternetHandle session(WinHttpOpen(L"Calcu/2", endpoint.secure ? WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY : WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 7000, 7000, kind == Request::health || kind == Request::live ? 5000 : 32000)) {
         return networkError();
@@ -116,7 +120,7 @@ ChatReply request(const Connection& connection, std::string body, Request kind) 
     InternetHandle host(WinHttpConnect(session.value, endpoint.host.c_str(), endpoint.port, 0));
     if (!host.value) return networkError();
     InternetHandle post(WinHttpOpenRequest(host.value, kind == Request::health || kind == Request::live ? L"GET" : L"POST", endpoint.path.c_str(),
-        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, endpoint.secure ? WINHTTP_FLAG_SECURE : 0));
     if (!post.value) return networkError();
     DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     if (!WinHttpSetOption(post.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof redirects)) {
@@ -134,7 +138,8 @@ ChatReply request(const Connection& connection, std::string body, Request kind) 
         WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeSize, WINHTTP_NO_HEADER_INDEX)) return networkError();
     if (code == 401 || code == 403) return error("Token rechazado");
     if (code == 424) return error("Clave/modelo API");
-    if (code == 503) return error("Revisa clave y modelo en el servidor.");
+    if (code == 503) return error(connection.loopback && kind == Request::ask ? "Clave API falta" :
+        "Revisa clave y modelo en el servidor.");
     if (code == 429) return error("Revisa cuota o limite de OpenAI.");
     if (code == 504) return error("Tiempo de espera");
     if (code == 404) return error("Ruta del proxy");
@@ -213,7 +218,8 @@ bool validToken(const std::wstring& token) {
 
 void DesktopChat::configure(Connection connection) {
     connection_ = std::move(connection);
-    status_ = connection_.demo ? L"Demostración local" :
+    localSetupNeeded_ = false;
+    status_ = connection_.demo ? L"Demostración local" : connection_.loopback ? L"Servidor local listo" :
         connection_.configured() ? L"HTTPS configurado" : L"Servidor sin configurar";
 }
 
@@ -229,7 +235,7 @@ ChatReply DesktopChat::startWithHistory(std::string_view question, const ChatHis
             "Avanza y retrocede por las paginas para leer el contenido completo.";
         return {ChatStatus::pending, {}};
     }
-    if (!connection_.configured()) return error("Configura proxy");
+    if (!connection_.configured()) return error(connection_.loopback ? "Servidor local" : "Configura proxy");
     if (work_.valid()) {
         if (work_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             return error("Espera a la red");
@@ -243,7 +249,7 @@ ChatReply DesktopChat::startWithHistory(std::string_view question, const ChatHis
     } catch (const std::exception&) {
         return error("Fallo de inicio");
     }
-    status_ = L"Conectando por HTTPS…";
+    status_ = connection_.loopback ? L"Consultando servidor local…" : L"Conectando por HTTPS…";
     started_ = now;
     return {ChatStatus::pending, {}};
 }
@@ -256,7 +262,9 @@ ChatReply DesktopChat::poll(uint32_t now) {
     if (!work_.valid()) return {ChatStatus::idle, {}};
     if (ready(work_)) {
         auto reply = take(work_);
-        status_ = reply.status == ChatStatus::answer ? L"HTTPS conectado" : L"Error de conexión";
+        localSetupNeeded_ = connection_.loopback && reply.status == ChatStatus::error && reply.text == "Clave API falta";
+        status_ = reply.status == ChatStatus::answer ? L"Respuesta recibida" :
+            localSetupNeeded_ ? L"Configura la clave API de OpenAI" : L"Error de conexión";
         return reply;
     }
     if (now - started_ >= 45000) {
@@ -267,7 +275,9 @@ ChatReply DesktopChat::poll(uint32_t now) {
 }
 
 ConnectionCheck DesktopChat::check(const Connection& connection, uint32_t now) {
-    if (!validUrl(connection.url)) return {ChatStatus::error, 0, "Escribe la URL HTTPS terminada en /ask."};
+    if (parseUrl(connection.url, connection.loopback).host.empty()) {
+        return {ChatStatus::error, 0, "Escribe la URL HTTPS terminada en /ask."};
+    }
     if (check_.valid() && !ready(check_)) return {ChatStatus::error, 0, "La prueba anterior sigue en curso."};
     try { check_ = launch([connection] { return diagnose(connection); }); }
     catch (const std::exception&) { return {ChatStatus::error, 0, "No se pudo iniciar la prueba."}; }
@@ -285,8 +295,13 @@ ConnectionCheck DesktopChat::pollCheck(uint32_t now) {
     return {ChatStatus::pending, 0, {}};
 }
 
+bool DesktopChat::takeLocalSetupNeeded() {
+    return std::exchange(localSetupNeeded_, false);
+}
+
 const char* DesktopChat::connectionLabel() const {
     if (connection_.demo) return "Demostracion";
+    if (connection_.loopback) return "Servidor local";
     return connection_.configured() ? "HTTPS configurado" : "Sin servidor";
 }
 

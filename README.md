@@ -1,4 +1,4 @@
-# Calcu · Fase 5
+# Calcu · Fase 6
 
 Calculadora científica y cliente de ChatGPT en C++17. La aplicación de Windows y el firmware ESP32 comparten el motor matemático, el editor, el teclado multitap, los modos y el renderizado de LCD 16×2.
 
@@ -13,7 +13,9 @@ Para recompilar necesitas un compilador MinGW-w64 compatible con C++17. El lanza
 - **Ans** inserta el último resultado válido de la sesión. **Historial** permite recorrer hasta ocho cálculos válidos y **Editar cálculo** recupera la expresión y la unidad angular originales. Al recalcular una entrada con `Ans`, se usa el último resultado válido de la sesión.
 - Pulsa **Modo** o las dos teclas que aparecen en ese botón. La secuencia inicial es `*#`. En **Configuración** puedes elegir otra. El prefijo es `*` o `#`, y la segunda tecla puede ser `#`, `*`, `0`, `7`, `8` o `9`. La tecla especial que no se usa como prefijo conserva la función de confirmar por sí sola. Los botones de operaciones siguen disponibles.
 - En **ChatGPT**, pulsa repetidamente un dígito para elegir una letra. **Confirmar letra** fija el carácter al instante. **ABC / 123** cambia a escritura numérica y las flechas permiten corregir en medio del borrador. **Página anterior** y **Página siguiente** permiten revisar preguntas largas y respuestas.
-- Para probar sin conexión, activa **Usar respuesta de demostración local** en Configuración. Para una consulta real, desactívala e introduce la URL HTTPS completa del intermediario y su token de dispositivo. Pulsa **Probar conexión** para verificar por separado servidor HTTPS, token y OpenAI. Luego pulsa **Guardar**. El certificado se verifica con la confianza de Windows. La URL, el modo de demostración, el atajo, el formato y la unidad angular se guardan en `calcu.ini` junto al ejecutable. Windows cifra el token con DPAPI para la cuenta actual.
+- **ChatGPT local en Windows:** conserva vacíos los campos de URL y token, y desactiva **Usar respuesta de demostración local**. El ejecutable inicia y cierra automáticamente su servidor en `127.0.0.1`, con puerto dinámico y token efímero. Para configurarlo por primera vez, pulsa **Configurar OpenAI** desde ChatGPT o envía tu primera pregunta.
+- **Servidor externo:** escribe la URL HTTPS terminada en `/ask` y el token de dispositivo. **Probar conexión** distingue servidor, token y respuesta de OpenAI. Windows verifica el certificado. La configuración externa, la demostración, el atajo, el formato y la unidad angular se guardan en `calcu.ini`. Windows cifra el token externo con DPAPI.
+- Para usar una respuesta simulada, activa **Usar respuesta de demostración local** de forma explícita.
 
 - **Historial de conversación** abre el turno más reciente. Vuelve a pulsarlo para recorrer turnos anteriores y usa los botones de página para leer cada pregunta y respuesta. Calcu conserva hasta cuatro turnos exitosos en memoria y los envía como contexto con la siguiente pregunta. El historial se reinicia al cerrar, reiniciar el ESP32 o cambiar de conexión en Windows.
 
@@ -108,7 +110,17 @@ pio device monitor -e esp32 --port COM5 --echo
 
 Sustituye `COM5` por el puerto real. [Documentación de carga de PlatformIO](https://docs.platformio.org/page/userguide/cmd_run.html)
 
-## Activar ChatGPT real con un intermediario HTTPS
+## Activar ChatGPT local en Windows
+
+1. Instala Python 3.10 o posterior con Tkinter si falta. Conserva la carpeta `server` junto a `Calcu.exe`.
+2. Abre **Abrir Calcu.cmd** y entra a ChatGPT con `*#`. Pulsa **Configurar OpenAI**. En la ventana del asistente pega tu clave API de un proyecto de OpenAI con cuota disponible, pulsa **Guardar clave** y cierra el asistente. También se abre automáticamente al enviar una pregunta sin clave. [Claves de la API](https://platform.openai.com/api-keys)
+3. Envía una pregunta. En multitap, escribe `HOLA` con `44`, `666`, `555` y `2`. Si venías de un error, vuelve al borrador y pulsa **Enviar pregunta**. Usa **Página siguiente** para avanzar y **Volver a la pregunta** para redactar el siguiente turno.
+
+Windows cifra la clave con DPAPI para la cuenta actual y la guarda en `%LOCALAPPDATA%\Calcu\openai.dpapi`. El servidor la lee al consultar OpenAI. Si el proceso se inicia con `OPENAI_API_KEY`, esa variable tiene prioridad. El modelo local por defecto es `gpt-6-luna`, que admite Responses API y está orientado a tareas breves con bajo costo. Para usar otro modelo habilitado en tu proyecto, define `OPENAI_MODEL` antes de abrir Calcu. [Modelo GPT‑6 Luna en OpenAI Docs](https://developers.openai.com/api/docs/models/gpt-6-luna)
+
+El enlace local usa HTTP directo solo en `127.0.0.1`. El servidor enlaza únicamente esa dirección y protege las consultas con el token de la sesión. La conexión del servidor a OpenAI sigue siendo HTTPS. Si el diagnóstico indica cuota o límite, revisa los créditos y límites del proyecto de API. El diagnóstico no añade turnos al historial.
+
+## Activar ChatGPT con un intermediario HTTPS externo
 
 1. En el equipo servidor, crea u obtén una clave de un proyecto de OpenAI con acceso a Responses API. Identifica el ID de un modelo habilitado en ese mismo proyecto. [Claves de la API](https://platform.openai.com/api-keys) · [Referencia de Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
 2. Abre PowerShell en la raíz del proyecto **en el servidor**. Indica el modelo y genera un token independiente para Calcu. Conserva el token si ya tienes clientes configurados.
@@ -136,7 +148,7 @@ Windows usa un trabajador WinHTTP y el ESP32 usa una tarea de FreeRTOS. La inter
 
 ## Pruebas
 
-Consulta el [informe de Fase 5](informes/Fase_5.md) para los resultados de compilación, pruebas y comprobación visual.
+Consulta el [informe de Fase 6](informes/Fase_6.md) para los resultados de compilación, pruebas y comprobación visual.
 
 ```powershell
 pio test -e native
@@ -147,14 +159,14 @@ python -B -m unittest discover -s server -v
 - Python prueba el contrato HTTP en localhost y la conversión de respuestas con una llamada a OpenAI simulada.
 - El recorrido de consola anterior verifica la calculadora, multitap, el LCD y la respuesta paginada desde el punto de entrada normal.
 
-La Fase 5 volvió a compilar el perfil provisional `esp32dev` y pasó la suite C++ y las siete pruebas de Python. La prueba `test/windows/test_desktop.cpp` comprueba la persistencia de atajo, ángulo y conexión, el cifrado del token, la validación de URL y la respuesta de demostración. Para repetirla con un compilador compatible disponible como `g++` (o reemplázalo por `clang++`):
+La Fase 6 volvió a compilar el perfil provisional `esp32dev` y pasó la suite C++ y las diez pruebas de Python. La prueba `test/windows/test_desktop.cpp` comprueba la persistencia de atajo, ángulo y conexión, el cifrado del token, la validación de URL y la respuesta de demostración. Para repetirla con un compilador compatible disponible como `g++` (o reemplázalo por `clang++`):
 
 ```powershell
 g++ -std=c++17 -I include -I src/windows test/windows/test_desktop.cpp src/windows/settings.cpp src/windows/desktop_chat.cpp src/core/chat.cpp -static -lwinhttp -lcrypt32 -o "$env:TEMP/calcu-test.exe"
 & "$env:TEMP/calcu-test.exe"
 ```
 
-Si `openssl` está en `PATH`, la suite Python genera un certificado efímero y prueba dos turnos por HTTPS con OpenAI simulado. Puedes asignar la ruta del binario de prueba de Windows a `CALCU_TEST_WINHTTP_EXE` para comprobar también que el cliente rechaza el certificado efímero sin confianza en el almacén de Windows.
+Si `openssl` está en `PATH`, la suite Python genera un certificado efímero y prueba dos turnos por HTTPS con OpenAI simulado. Puedes asignar la ruta del binario de prueba de Windows a `CALCU_TEST_WINHTTP_EXE` para probar dos turnos WinHTTP con un proveedor simulado en loopback y comprobar que el cliente rechaza un certificado HTTPS sin confianza.
 
 ## Publicación por fase
 

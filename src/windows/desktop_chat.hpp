@@ -10,6 +10,7 @@ struct Connection {
     bool demo = false;
     std::wstring url;
     std::wstring token;
+    bool loopback = false;
 
     bool configured() const { return !url.empty() && !token.empty(); }
 };
@@ -33,6 +34,7 @@ public:
     ConnectionCheck pollCheck(uint32_t now);
     const char* connectionLabel() const override;
     const wchar_t* statusText() const { return status_; }
+    bool takeLocalSetupNeeded();
 
 private:
     Connection connection_;
@@ -41,6 +43,7 @@ private:
     uint32_t checkStarted_ = 0;
     std::string demoAnswer_;
     uint32_t started_ = 0;
+    bool localSetupNeeded_ = false;
     const wchar_t* status_ = L"Servidor sin configurar";
 };
 

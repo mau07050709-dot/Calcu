@@ -28,7 +28,7 @@ $sources = @(Get-ChildItem -Path src/core,src/windows -File -Filter '*.cpp' | Fo
 $binary = Join-Path $PWD 'Calcu.exe'
 $tempExe = Join-Path $PWD "Calcu.build.$PID.exe"
 try {
-    & $compiler -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -DNOMINMAX -I include @sources -static -municode -mwindows -lwinhttp -lcrypt32 -lgdi32 -o $tempExe
+    & $compiler -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -DNOMINMAX -I include @sources -static -municode -mwindows -lwinhttp -lcrypt32 -lbcrypt -lgdi32 -o $tempExe
     if ($LASTEXITCODE -ne 0) { throw 'No se pudo compilar. Revisa los mensajes anteriores.' }
     if ([IO.File]::Exists($binary)) {
         [IO.File]::Replace($tempExe, $binary, [System.Management.Automation.Language.NullString]::Value)

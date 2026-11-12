@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "desktop_chat.hpp"
+#include "local_proxy.hpp"
 #include "settings.hpp"
 #include "scientific_display.hpp"
 
@@ -29,7 +30,7 @@ enum Id {
     star = 300, hash, switchMode, preferences, erase, clear, cursorLeft, cursorRight,
     go, angle, letters, commit, previous, next, save, cancel,
     prefixField, modeField, urlField, tokenField, demoField, formatKey, historyOlder, historyNewer,
-    testConnection, conversationHistory
+    testConnection, conversationHistory, setupOpenAI, setupOpenAISettings
 };
 enum class Panel { common, calculator, chat, settings };
 enum Style { neutral, primary, mutedButton };
@@ -116,6 +117,10 @@ private:
     void showSettings();
     void storeSettings();
     Connection connectionFromFields() const;
+    bool usesLocalProxy() const;
+    void applyConnection();
+    void updateLocalProxy();
+    void setupOpenAIKey();
     void checkConnection();
     void updateConnectionCheck();
     void showConnectionCheck(const ConnectionCheck& result);
@@ -154,6 +159,8 @@ private:
     std::wstring settingsFile_ = settingsPath();
     Settings settings_ = Settings::load(settingsFile_);
     Lcd lcd_;
+    LocalProxy local_;
+    std::wstring activeLocalUrl_;
     DesktopChat chat_;
     App app_{lcd_, chat_};
 };
@@ -224,6 +231,7 @@ void Window::build() {
     button(424, L"Enviar pregunta", 300, 537, 389, 44, Panel::chat, primary);
     sendButton_ = GetDlgItem(window_, 424);
     button(conversationHistory, L"Historial", 300, 593, 389, 39, Panel::chat, mutedButton);
+    button(setupOpenAI, L"Configurar OpenAI", 28, 593, 242, 39, Panel::chat, mutedButton);
 
     label(L"Configuración", 28, 83, 650, 34, Panel::settings, bold_);
     label(L"Combinación para cambiar de modo", 28, 130, 380, 25, Panel::settings);
@@ -234,7 +242,7 @@ void Window::build() {
     for (const auto symbol : {L"*", L"#"}) ComboBox_AddString(prefix, symbol);
     for (const auto symbol : {L"#", L"*", L"0", L"7", L"8", L"9"}) ComboBox_AddString(last, symbol);
     label(L"Pulsa ambas teclas en orden dentro de 1,2 segundos.", 28, 197, 665, 22, Panel::settings);
-    label(L"URL HTTPS del intermediario", 28, 243, 665, 24, Panel::settings, bold_);
+    label(L"URL HTTPS externa (vacía para usar el servidor local)", 28, 243, 665, 24, Panel::settings, bold_);
     auto url = control(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, urlField,
         28, 274, 661, 31, Panel::settings);
     SendMessageW(url, EM_SETLIMITTEXT, 1000, 0);
@@ -245,6 +253,7 @@ void Window::build() {
     control(L"BUTTON", L"Usar respuesta de demostración local", BS_AUTOCHECKBOX | WS_TABSTOP, demoField,
         28, 413, 585, 31, Panel::settings);
     button(testConnection, L"Probar conexión", 28, 459, 181, 38, Panel::settings, mutedButton);
+    button(setupOpenAISettings, L"Configurar OpenAI", 28, 508, 181, 38, Panel::settings, mutedButton);
     settingsStatus_ = label(L"", 228, 457, 460, 86, Panel::settings);
     button(cancel, L"Cancelar", 411, 550, 126, 43, Panel::settings, mutedButton);
     button(save, L"Guardar", 546, 550, 143, 43, Panel::settings, primary);
@@ -331,7 +340,8 @@ void Window::refresh() {
         mathStatus = L"Historial " + std::to_wstring(app_.historyPosition()) + L" de " +
             std::to_wstring(app_.historySize()) + (entry->angle == Angle::degrees ? L"  ·  DEG" : L"  ·  RAD");
     }
-    textIfChanged(status_, isChat ? chat_.statusText() :
+    textIfChanged(status_, isChat ?
+        (usesLocalProxy() && !local_.connection().configured() ? local_.status() : chat_.statusText()) :
         mathSettingsSaveFailed_ ? L"No se pudo guardar la configuración" : mathStatus);
     textIfChanged(angleButton_, app_.angle() == Angle::degrees ? L"DEG" : L"RAD");
     textIfChanged(GetDlgItem(window_, formatKey), formatLabel(app_.resultFormat()));
@@ -346,7 +356,8 @@ void Window::refresh() {
     textIfChanged(sendButton_, app_.readingChatHistory() ? L"Salir del historial" :
         app_.showingChatReply() ? L"Volver a la pregunta" : L"Enviar pregunta");
     const bool pending = app_.chatStatus() == ChatStatus::pending;
-    EnableWindow(sendButton_, !pending);
+    EnableWindow(sendButton_, !pending && (!usesLocalProxy() || local_.connection().configured() || app_.showingChatReply()));
+    EnableWindow(GetDlgItem(window_, setupOpenAI), usesLocalProxy());
     const auto historyButton = GetDlgItem(window_, conversationHistory);
     textIfChanged(historyButton, L"Historial de conversación (" + std::to_wstring(app_.chatHistorySize()) + L")");
     EnableWindow(historyButton, !pending && app_.chatHistorySize() > 0);
@@ -383,6 +394,11 @@ Connection Window::connectionFromFields() const {
 
 void Window::checkConnection() {
     checkedConnection_ = connectionFromFields();
+    if (checkedConnection_.url.empty() && checkedConnection_.token.empty()) {
+        local_.start(GetTickCount());
+        checkedConnection_ = local_.connection();
+        if (!checkedConnection_.configured()) return notify(local_.status());
+    }
     const auto reply = chat_.check(checkedConnection_, GetTickCount());
     if (reply.status != ChatStatus::pending) {
         showConnectionCheck(reply);
@@ -401,7 +417,9 @@ void Window::updateConnectionCheck() {
     EnableWindow(GetDlgItem(window_, testConnection), TRUE);
     if (!settingsOpen_) return;
     const auto current = connectionFromFields();
-    if (current.url != checkedConnection_.url || current.token != checkedConnection_.token) {
+    const auto& expected = checkedConnection_.loopback && current.url.empty() && current.token.empty()
+        ? local_.connection() : current;
+    if (expected.url != checkedConnection_.url || expected.token != checkedConnection_.token) {
         notify(L"Los datos cambiaron. Vuelve a probar la conexión.");
         return;
     }
@@ -413,13 +431,57 @@ void Window::showConnectionCheck(const ConnectionCheck& result) {
         if (result.completed >= step) return L"Correcto";
         return step == result.completed + 1 ? L"Sin confirmar" : L"Pendiente";
     };
-    auto message = std::wstring(L"Servidor HTTPS: ") + label(1) + L"\r\nToken: " +
+    auto message = std::wstring(checkedConnection_.loopback ? L"Servidor local: " : L"Servidor HTTPS: ") + label(1) + L"\r\nToken: " +
         label(2) + L"\r\nOpenAI: " + label(3);
     if (!result.detail.empty()) {
         message += L"\r\n";
         message.append(result.detail.begin(), result.detail.end());
     }
     notify(message.c_str());
+}
+
+bool Window::usesLocalProxy() const {
+    const auto& connection = settings_.connection;
+    return !connection.demo && connection.url.empty() && connection.token.empty();
+}
+
+void Window::applyConnection() {
+    if (!usesLocalProxy()) {
+        local_.stop();
+        activeLocalUrl_.clear();
+        chat_.configure(settings_.connection);
+        return;
+    }
+    local_.start(GetTickCount());
+    auto current = local_.connection();
+    current.loopback = true;
+    activeLocalUrl_ = current.url;
+    chat_.configure(std::move(current));
+}
+
+void Window::updateLocalProxy() {
+    local_.poll(GetTickCount());
+    if (usesLocalProxy() && activeLocalUrl_ != local_.connection().url) {
+        auto current = local_.connection();
+        current.loopback = true;
+        activeLocalUrl_ = current.url;
+        chat_.configure(std::move(current));
+    }
+    if (local_.setupFailed()) {
+        MessageBoxW(window_, L"El asistente necesita Python 3 con Tkinter. Revisa el README.",
+                    L"Configurar OpenAI", MB_OK | MB_ICONWARNING);
+    }
+    if (usesLocalProxy() && !settingsOpen_ && app_.mode() == Mode::chat && chat_.takeLocalSetupNeeded()) {
+        setupOpenAIKey();
+    }
+}
+
+void Window::setupOpenAIKey() {
+    if (usesLocalProxy()) local_.start(GetTickCount());
+    if (!local_.configureKey()) {
+        MessageBoxW(window_, L"Instala Python 3 con Tkinter y conserva la carpeta server junto a Calcu.exe.",
+                    L"Configurar OpenAI", MB_OK | MB_ICONWARNING);
+    }
 }
 
 void Window::storeSettings() {
@@ -434,6 +496,9 @@ void Window::storeSettings() {
     candidate.shortcut = {selected(prefixField), selected(modeField)};
     candidate.connection = connectionFromFields();
     if (!candidate.shortcut.valid()) return notify(L"Selecciona las dos teclas del atajo.");
+    if (candidate.connection.url.empty() != candidate.connection.token.empty()) {
+        return notify(L"Completa URL y token para el servidor externo, o deja los dos vacíos.");
+    }
     if (!candidate.connection.url.empty() && !validUrl(candidate.connection.url)) {
         return notify(L"Introduce una URL HTTPS válida, por ejemplo https://servidor/ask.");
     }
@@ -451,7 +516,7 @@ void Window::storeSettings() {
     settings_ = std::move(candidate);
     mathSettingsSaveFailed_ = false;
     app_.configureShortcut(settings_.shortcut);
-    if (changedConnection) chat_.configure(settings_.connection);
+    if (changedConnection) applyConnection();
     app_.tick(GetTickCount());
     command(cancel);
 }
@@ -531,6 +596,7 @@ void Window::command(int id) {
     if (settingsOpen_) {
         if (id == save) storeSettings();
         if (id == testConnection) checkConnection();
+        if (id == setupOpenAISettings) setupOpenAIKey();
         if (id == cancel) {
             settingsOpen_ = false;
             panelDirty_ = true;
@@ -561,6 +627,7 @@ void Window::command(int id) {
         case 424: action(Action::enter); break;
         case letters: action(Action::paletteOrNumbers); break;
         case commit: action(Action::angleOrCommit); break;
+        case setupOpenAI: if (usesLocalProxy()) setupOpenAIKey(); break;
         case conversationHistory: action(Action::chatHistory); break;
         case previous: action(Action::left); break;
         case next: action(Action::right); break;
@@ -622,13 +689,14 @@ LRESULT Window::process(UINT message, WPARAM w, LPARAM l) {
             app_.configureShortcut(settings_.shortcut);
             app_.setAngle(settings_.angle);
             app_.setResultFormat(settings_.format);
-            chat_.configure(settings_.connection);
+            applyConnection();
             app_.tick(GetTickCount());
             refresh();
             SetTimer(window_, 1, 50, nullptr);
             return 0;
         case WM_TIMER:
             app_.tick(GetTickCount());
+            updateLocalProxy();
             updateConnectionCheck();
             if (app_.mode() == Mode::chat) refresh();
             return 0;

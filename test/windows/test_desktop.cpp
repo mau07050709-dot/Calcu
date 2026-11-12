@@ -23,6 +23,30 @@ struct TemporarySettings {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 4 && std::string_view(argv[1]) == "--loopback") {
+            const std::string_view url(argv[2]), token(argv[3]);
+            const Connection local{false, {url.begin(), url.end()}, {token.begin(), token.end()}, true};
+            DesktopChat chat;
+            check(!validUrl(local.url), "HTTP sigue prohibido en la configuracion externa");
+            const Connection nonlocal{false, L"http://example.invalid/ask", local.token, true};
+            check(chat.check(nonlocal, GetTickCount()).status == ChatStatus::error, "Loopback rechaza otros destinos");
+            chat.configure(local);
+            auto send = [&](std::string_view question, const ChatHistory& history) {
+                auto reply = chat.startWithHistory(question, history, GetTickCount());
+                check(reply.status == ChatStatus::pending, "Consulta local asincrona");
+                while (reply.status == ChatStatus::pending) {
+                    Sleep(20);
+                    reply = chat.poll(GetTickCount());
+                }
+                check(reply.status == ChatStatus::answer, "Respuesta HTTP local");
+                return reply.text;
+            };
+            const auto first = send("HOLA", {});
+            check(first.size() > 32, "Respuesta local de varias paginas");
+            check(send("QUE DIJE", {{"HOLA", first}}) == "Recuerdo HOLA", "Segundo turno con contexto");
+            std::cout << "OK: dos turnos WinHTTP en loopback con proveedor simulado\n";
+            return 0;
+        }
         if (argc == 3) {
             const std::string_view url(argv[1]), token(argv[2]);
             const Connection local{false, {url.begin(), url.end()}, {token.begin(), token.end()}};
