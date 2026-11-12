@@ -45,4 +45,4 @@ Pega una clave válida en **Calcu · Configurar OpenAI**, pulsa **Guardar clave*
 
 ## GitHub
 
-La fase conserva los commits anteriores. La verificación remota y el enlace al commit de implementación se añadirán después de publicar en `main`.
+Se publicó la [implementación de la Fase 6 (`744f48e`)](https://github.com/mau07050709-dot/Calcu/commit/744f48ebbf0fb780a63263f4ad97204031297e75) en `main`, conservando los commits anteriores. Se verificó el hash remoto y la página del commit respondió HTTP 200. Se revisaron los 53 archivos del índice para excluir claves, configuraciones privadas, binarios y temporales.
