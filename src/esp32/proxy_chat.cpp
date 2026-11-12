@@ -128,6 +128,7 @@ ChatReply ProxyChat::ask(std::string& body) const {
     http.setConnectTimeout(7000);
     http.setTimeout(32000);
     http.useHTTP10(true);
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     if (!http.begin(socket, net.proxyUrl)) return error("URL HTTPS invalida");
 
     http.addHeader("Content-Type", "application/json");
@@ -136,7 +137,8 @@ ChatReply ProxyChat::ask(std::string& body) const {
     if (status == 401 || status == 403) return error("Token rechazado");
     if (status == 424) return error("Clave/modelo API");
     if (status == 404) return error("Ruta del proxy");
-    if (status == 429 || status == 503) return error("Servidor ocupado");
+    if (status == 429) return error("Cuota de API");
+    if (status == 503) return error("API sin config.");
     if (status == 504 || status == HTTPC_ERROR_READ_TIMEOUT) return error("Tiempo de espera");
     if (status < 0) return error("Fallo de red/TLS");
     if (status != 200) return error("Error del proxy");

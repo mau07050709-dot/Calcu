@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace calcu::desktop {
@@ -92,34 +93,37 @@ std::string answerFromJson(std::string_view json) {
     return {};
 }
 
-ChatReply request(Connection connection, std::string body, bool health) {
+enum class Request { ask, live, health, verify };
+
+ChatReply request(const Connection& connection, std::string body, Request kind) {
     auto endpoint = parseUrl(connection.url);
     if (endpoint.host.empty()) return error("URL HTTPS invalida");
-    if (health) {
+    if (kind != Request::ask) {
         endpoint.path = endpoint.path.substr(0, endpoint.path.find(L'?'));
         constexpr std::wstring_view route = L"/ask";
         if (endpoint.path.size() < route.size() ||
             endpoint.path.compare(endpoint.path.size() - route.size(), route.size(), route) != 0) {
             return error("La URL debe terminar en /ask");
         }
-        endpoint.path.replace(endpoint.path.size() - 3, 3, L"health");
+        endpoint.path.replace(endpoint.path.size() - 3, 3,
+            kind == Request::live ? L"live" : kind == Request::health ? L"health" : L"verify");
     }
     InternetHandle session(WinHttpOpen(L"Calcu/2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 7000, 7000, health ? 8000 : 32000)) {
+    if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 7000, 7000, kind == Request::health || kind == Request::live ? 5000 : 32000)) {
         return networkError();
     }
     InternetHandle host(WinHttpConnect(session.value, endpoint.host.c_str(), endpoint.port, 0));
     if (!host.value) return networkError();
-    InternetHandle post(WinHttpOpenRequest(host.value, health ? L"GET" : L"POST", endpoint.path.c_str(),
+    InternetHandle post(WinHttpOpenRequest(host.value, kind == Request::health || kind == Request::live ? L"GET" : L"POST", endpoint.path.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
     if (!post.value) return networkError();
     DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     if (!WinHttpSetOption(post.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof redirects)) {
         return networkError();
     }
-    const std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " +
-        connection.token + L"\r\n";
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    if (kind != Request::live) headers += L"Authorization: Bearer " + connection.token + L"\r\n";
     const DWORD length = static_cast<DWORD>(body.size());
     if (!WinHttpSendRequest(post.value, headers.c_str(), DWORD(-1), body.data(), length, length, 0) ||
         !WinHttpReceiveResponse(post.value, nullptr)) return networkError();
@@ -130,7 +134,8 @@ ChatReply request(Connection connection, std::string body, bool health) {
         WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeSize, WINHTTP_NO_HEADER_INDEX)) return networkError();
     if (code == 401 || code == 403) return error("Token rechazado");
     if (code == 424) return error("Clave/modelo API");
-    if (code == 429 || code == 503) return error("Servidor ocupado");
+    if (code == 503) return error("Revisa clave y modelo en el servidor.");
+    if (code == 429) return error("Revisa cuota o limite de OpenAI.");
     if (code == 504) return error("Tiempo de espera");
     if (code == 404) return error("Ruta del proxy");
     if (code != 200) return error("Error del proxy");
@@ -143,23 +148,53 @@ ChatReply request(Connection connection, std::string body, bool health) {
         if (json.size() + count > 2048) return error("Respuesta extensa");
         json.append(buffer, count);
     } while (count != 0);
-    if (health) {
-        if (json != R"({"service":"calcu","ready":true})") return error("Respuesta de prueba invalida");
-        return {ChatStatus::answer, "HTTPS y token correctos. Envia una pregunta para probar OpenAI."};
+    if (kind != Request::ask) {
+        const char* expected = kind == Request::live ? R"({"service":"calcu","available":true})" :
+            kind == Request::health ? R"({"service":"calcu","ready":true})" :
+            R"({"service":"calcu","openai":true})";
+        if (json != expected) return error("El servidor no devolvio el estado de Calcu.");
+        return {ChatStatus::answer, {}};
     }
     auto answer = answerFromJson(json);
     if (answer.empty()) return error("Respuesta invalida");
     return {ChatStatus::answer, std::move(answer)};
 }
 
-bool ready(const std::future<ChatReply>& job) {
+ConnectionCheck diagnose(const Connection& connection) {
+    unsigned completed = 0;
+    for (const auto kind : {Request::live, Request::health, Request::verify}) {
+        if (kind == Request::health && !validToken(connection.token)) {
+            return {ChatStatus::error, completed, "Pega CALCU_DEVICE_TOKEN del servidor."};
+        }
+        const auto result = request(connection, {}, kind);
+        if (result.status != ChatStatus::answer) {
+            std::string detail = result.text;
+            if (detail == "Clave/modelo API" || (kind == Request::verify && detail == "Revisa clave y modelo en el servidor.")) {
+                detail = "Revisa OPENAI_API_KEY y OPENAI_MODEL en el servidor.";
+            } else if (detail == "Token rechazado") {
+                detail = "Usa el mismo CALCU_DEVICE_TOKEN del servidor.";
+            } else if (detail == "Certificado TLS") {
+                detail = "Revisa el nombre y la confianza del certificado TLS.";
+            } else if (detail == "Ruta del proxy") {
+                detail = "Comprueba la URL /ask y actualiza el servidor a Fase 5.";
+            }
+            return {ChatStatus::error, completed, std::move(detail)};
+        }
+        ++completed;
+    }
+    return {ChatStatus::answer, completed, {}};
+}
+
+template<class T>
+bool ready(const std::future<T>& job) {
     return job.valid() && job.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
-std::future<ChatReply> launch(const Connection& connection, std::string body, bool health) {
-    std::packaged_task<ChatReply(Connection, std::string, bool)> job(request);
+template<class Work>
+auto launch(Work work) {
+    std::packaged_task<std::invoke_result_t<Work>()> job(std::move(work));
     auto result = job.get_future();
-    std::thread(std::move(job), connection, std::move(body), health).detach();
+    std::thread(std::move(job)).detach();
     return result;
 }
 
@@ -202,7 +237,9 @@ ChatReply DesktopChat::startWithHistory(std::string_view question, const ChatHis
         work_ = {};
     }
     try {
-        work_ = launch(connection_, chatRequestJson(question, history), false);
+        work_ = launch([connection = connection_, body = chatRequestJson(question, history)]() mutable {
+            return request(connection, std::move(body), Request::ask);
+        });
     } catch (const std::exception&) {
         return error("Fallo de inicio");
     }
@@ -229,22 +266,23 @@ ChatReply DesktopChat::poll(uint32_t now) {
     return {ChatStatus::pending, {}};
 }
 
-ChatReply DesktopChat::check(const Connection& connection, uint32_t now) {
-    if (!connection.configured() || !validUrl(connection.url) || !validToken(connection.token)) {
-        return error("Completa URL HTTPS y token.");
-    }
-    if (check_.valid() && !ready(check_)) return error("La prueba anterior sigue en curso.");
-    try { check_ = launch(connection, {}, true); }
-    catch (const std::exception&) { return error("No se pudo iniciar la prueba."); }
+ConnectionCheck DesktopChat::check(const Connection& connection, uint32_t now) {
+    if (!validUrl(connection.url)) return {ChatStatus::error, 0, "Escribe la URL HTTPS terminada en /ask."};
+    if (check_.valid() && !ready(check_)) return {ChatStatus::error, 0, "La prueba anterior sigue en curso."};
+    try { check_ = launch([connection] { return diagnose(connection); }); }
+    catch (const std::exception&) { return {ChatStatus::error, 0, "No se pudo iniciar la prueba."}; }
     checkStarted_ = now;
-    return {ChatStatus::pending, {}};
+    return {ChatStatus::pending, 0, {}};
 }
 
-ChatReply DesktopChat::pollCheck(uint32_t now) {
-    if (!check_.valid()) return {ChatStatus::idle, {}};
-    if (ready(check_)) return take(check_);
-    if (now - checkStarted_ >= 20000) return error("Tiempo de espera de la prueba.");
-    return {ChatStatus::pending, {}};
+ConnectionCheck DesktopChat::pollCheck(uint32_t now) {
+    if (!check_.valid()) return {ChatStatus::idle, 0, {}};
+    if (ready(check_)) {
+        try { return check_.get(); }
+        catch (const std::exception&) { return {ChatStatus::error, 0, "Fallo de red."}; }
+    }
+    if (now - checkStarted_ >= 55000) return {ChatStatus::error, 0, "Tiempo de espera de la prueba."};
+    return {ChatStatus::pending, 0, {}};
 }
 
 const char* DesktopChat::connectionLabel() const {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "wifi_retry.hpp"
+
 #include <cstdint>
 
 namespace calcu {
@@ -13,8 +15,10 @@ public:
 
 private:
     bool configured_ = false;
-    bool attempted_ = false;
     bool clockStarted_ = false;
-    uint32_t lastAttempt_ = 0;
+    bool hadConnection_ = false;
+    bool clockTimedOut_ = false;
+    uint32_t clockStartedAt_ = 0;
+    WifiRetry retry_;
 };
 }

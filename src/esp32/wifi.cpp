@@ -16,18 +16,22 @@ void Wifi::begin() {
 
 void Wifi::tick(uint32_t now) {
     if (!configured_) return;
-    if (connected()) {
+    const bool online = connected();
+    const auto attempt = retry_.tick(now, online);
+    if (online) {
+        hadConnection_ = true;
         if (!clockStarted_) {
             configTime(0, 0, config::network.timeServer);
             clockStarted_ = true;
+            clockStartedAt_ = now;
         }
+        clockTimedOut_ = now - clockStartedAt_ >= 20000;
         return;
     }
 
     clockStarted_ = false;
-    if (!attempted_ || now - lastAttempt_ >= 15000) {
-        attempted_ = true;
-        lastAttempt_ = now;
+    clockTimedOut_ = false;
+    if (attempt == WifiAttempt::first || (attempt == WifiAttempt::reconnect && !WiFi.reconnect())) {
         WiFi.begin(config::network.ssid, config::network.password);
     }
 }
@@ -46,9 +50,9 @@ const char* Wifi::label() const {
         switch (WiFi.status()) {
             case WL_NO_SSID_AVAIL: return "Red no hallada";
             case WL_CONNECT_FAILED: return "WiFi no conecta";
-            default: return "Conectando WiFi";
+            default: return hadConnection_ ? "Reconectando" : "Conectando WiFi";
         }
     }
-    return ready() ? "WiFi listo" : "Ajustando reloj";
+    return ready() ? "WiFi listo" : clockTimedOut_ ? "Reloj sin NTP" : "Ajustando reloj";
 }
 }

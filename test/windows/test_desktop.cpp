@@ -28,22 +28,27 @@ int main(int argc, char** argv) {
             const Connection local{false, {url.begin(), url.end()}, {token.begin(), token.end()}};
             DesktopChat chat;
             check(chat.check(local, GetTickCount()).status == ChatStatus::pending, "Sonda TLS asincrona");
-            ChatReply reply{ChatStatus::pending, {}};
-            while (reply.status == ChatStatus::pending) {
+            ConnectionCheck probe{ChatStatus::pending, 0, {}};
+            while (probe.status == ChatStatus::pending) {
                 Sleep(20);
-                reply = chat.pollCheck(GetTickCount());
+                probe = chat.pollCheck(GetTickCount());
             }
-            check(reply.status == ChatStatus::error && reply.text == "Certificado TLS",
-                  "WinHTTP rechaza un certificado sin confianza");
+            check(probe.status == ChatStatus::error && probe.completed == 0 &&
+                  probe.detail.find("certificado TLS") != std::string::npos,
+                  "WinHTTP rechaza un certificado sin confianza en el primer paso");
             chat.configure(local);
             check(chat.startWithHistory("PRUEBA", {{"ANTERIOR", "RESPUESTA"}}, GetTickCount()).status ==
                   ChatStatus::pending, "POST TLS asincrono");
+            ChatReply reply{ChatStatus::pending, {}};
             do {
                 Sleep(20);
                 reply = chat.poll(GetTickCount());
             } while (reply.status == ChatStatus::pending);
             check(reply.status == ChatStatus::error && reply.text == "Certificado TLS",
                   "El POST tampoco omite la validacion");
+            chat.configure({true, {}, {}});
+            check(chat.start("PRUEBA", 1).status == ChatStatus::pending &&
+                  chat.poll(301).status == ChatStatus::answer, "Recupera la interfaz tras fallo TLS");
             std::cout << "OK: WinHTTP rechaza TLS sin confianza en GET y POST\n";
             return 0;
         }

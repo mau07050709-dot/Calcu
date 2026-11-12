@@ -118,6 +118,7 @@ private:
     Connection connectionFromFields() const;
     void checkConnection();
     void updateConnectionCheck();
+    void showConnectionCheck(const ConnectionCheck& result);
     void notify(const wchar_t* value);
     void persistMathSettings();
     RECT mathInput() const { return {px(49), px(118), px(669), px(202)}; }
@@ -244,9 +245,9 @@ void Window::build() {
     control(L"BUTTON", L"Usar respuesta de demostración local", BS_AUTOCHECKBOX | WS_TABSTOP, demoField,
         28, 413, 585, 31, Panel::settings);
     button(testConnection, L"Probar conexión", 28, 459, 181, 38, Panel::settings, mutedButton);
-    settingsStatus_ = label(L"", 228, 457, 460, 50, Panel::settings);
-    button(cancel, L"Cancelar", 411, 514, 126, 43, Panel::settings, mutedButton);
-    button(save, L"Guardar", 546, 514, 143, 43, Panel::settings, primary);
+    settingsStatus_ = label(L"", 228, 457, 460, 86, Panel::settings);
+    button(cancel, L"Cancelar", 411, 550, 126, 43, Panel::settings, mutedButton);
+    button(save, L"Guardar", 546, 550, 143, 43, Panel::settings, primary);
 }
 
 bool Window::create(HINSTANCE instance) {
@@ -370,7 +371,7 @@ void Window::showSettings() {
     SetDlgItemTextW(window_, urlField, settings_.connection.url.c_str());
     SetDlgItemTextW(window_, tokenField, settings_.connection.token.c_str());
     CheckDlgButton(window_, demoField, settings_.connection.demo ? BST_CHECKED : BST_UNCHECKED);
-    notify(checkingConnection_ ? L"Comprobando HTTPS y token…" : L"");
+    notify(checkingConnection_ ? L"Comprobando HTTPS, token y OpenAI…" : L"");
     refresh();
     SetFocus(GetDlgItem(window_, prefixField));
 }
@@ -384,13 +385,12 @@ void Window::checkConnection() {
     checkedConnection_ = connectionFromFields();
     const auto reply = chat_.check(checkedConnection_, GetTickCount());
     if (reply.status != ChatStatus::pending) {
-        const std::wstring message(reply.text.begin(), reply.text.end());
-        notify(message.c_str());
+        showConnectionCheck(reply);
         return;
     }
     checkingConnection_ = true;
     EnableWindow(GetDlgItem(window_, testConnection), FALSE);
-    notify(L"Comprobando HTTPS y token…");
+    notify(L"Comprobando HTTPS, token y OpenAI…");
 }
 
 void Window::updateConnectionCheck() {
@@ -405,7 +405,20 @@ void Window::updateConnectionCheck() {
         notify(L"Los datos cambiaron. Vuelve a probar la conexión.");
         return;
     }
-    const std::wstring message(reply.text.begin(), reply.text.end());
+    showConnectionCheck(reply);
+}
+
+void Window::showConnectionCheck(const ConnectionCheck& result) {
+    const auto label = [&](unsigned step) -> const wchar_t* {
+        if (result.completed >= step) return L"Correcto";
+        return step == result.completed + 1 ? L"Sin confirmar" : L"Pendiente";
+    };
+    auto message = std::wstring(L"Servidor HTTPS: ") + label(1) + L"\r\nToken: " +
+        label(2) + L"\r\nOpenAI: " + label(3);
+    if (!result.detail.empty()) {
+        message += L"\r\n";
+        message.append(result.detail.begin(), result.detail.end());
+    }
     notify(message.c_str());
 }
 

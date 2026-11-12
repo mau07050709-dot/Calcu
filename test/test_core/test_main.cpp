@@ -1,6 +1,7 @@
 #include "app.hpp"
 #include "config.hpp"
 #include "hardware_profile.hpp"
+#include "wifi_retry.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -246,6 +247,20 @@ void scientificSession() {
     check(display.frame[1][1] == '|', "LCD permite volver al inicio");
 }
 
+void wifiRecovery() {
+    WifiRetry retry;
+    check(retry.tick(100, false) == WifiAttempt::first, "WiFi inicia al encender");
+    check(retry.tick(15099, false) == WifiAttempt::none, "WiFi espera entre intentos");
+    check(retry.tick(15100, false) == WifiAttempt::reconnect, "WiFi reintenta sin bloquear");
+    check(retry.tick(15300, true) == WifiAttempt::none, "WiFi registra conexion");
+    check(retry.tick(15500, false) == WifiAttempt::reconnect, "WiFi reintenta al perder la red");
+    check(retry.tick(15501, false) == WifiAttempt::none, "WiFi evita reintentos continuos");
+    check(retry.tick(17000, true) == WifiAttempt::none, "WiFi acepta conexion recuperada");
+    WifiRetry wrapped;
+    check(wrapped.tick(UINT32_MAX - 999, false) == WifiAttempt::first, "WiFi usa reloj de 32 bits");
+    check(wrapped.tick(14000, false) == WifiAttempt::reconnect, "WiFi funciona tras desbordar millis");
+}
+
 void hardwareProfiles() {
     auto output = +[](int pin) { return pin >= 0 && pin < 28; };
     auto input = +[](int pin) { return pin >= 0 && pin < 32; };
@@ -394,6 +409,7 @@ int main() {
     scientificMath();
     scientificSession();
     hardwareProfiles();
+    wifiRecovery();
     conversationContext();
     multitap();
     modesAndDisplay();

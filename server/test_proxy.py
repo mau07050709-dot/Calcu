@@ -13,7 +13,7 @@ import urllib.request
 from http.server import HTTPServer
 from unittest.mock import patch
 
-from proxy import ANSWER_LIMIT, ServiceError, TlsServer, handler_for, lcd_text, openai_answer, tls_context
+from proxy import ANSWER_LIMIT, ServiceError, TlsServer, handler_for, lcd_text, openai_answer, tls_context, verify_openai
 
 
 class OpenAIContract(unittest.TestCase):
@@ -51,6 +51,20 @@ class OpenAIContract(unittest.TestCase):
                     openai_answer("Prueba", "api-test", "test-model")
             self.assertEqual(failure.exception.status, expected)
 
+    def test_verification_requires_generated_text_and_configuration(self):
+        with patch("proxy.openai_http.open") as call:
+            with self.assertRaises(ServiceError) as missing:
+                verify_openai("", "model-test")
+            self.assertEqual(missing.exception.status, 503)
+            call.assert_not_called()
+        for state, content in (("incomplete", {"type": "output_text", "text": "OK"}),
+                               ("completed", {"type": "refusal", "refusal": "No"})):
+            response = {"status": state, "output": [{"type": "message", "content": [content]}]}
+            with patch("proxy.openai_http.open", return_value=io.BytesIO(json.dumps(response).encode())):
+                with self.assertRaises(ServiceError) as invalid:
+                    verify_openai("api-test", "model-test")
+                self.assertEqual(invalid.exception.status, 502)
+
     def test_limits_text(self):
         rendered = lcd_text("A" * 1000)
         self.assertEqual(len(rendered), ANSWER_LIMIT)
@@ -60,7 +74,7 @@ class OpenAIContract(unittest.TestCase):
 class HttpContract(unittest.TestCase):
     def test_route_token_validation_and_response_length(self):
         token = "local-test-token"
-        with HTTPServer(("127.0.0.1", 0), handler_for(token, lambda q, history: f"Eco {q}")) as server:
+        with HTTPServer(("127.0.0.1", 0), handler_for(token, lambda q, history: f"Eco {q}", lambda: verify_openai("", ""))) as server:
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
             try:
@@ -116,7 +130,12 @@ class HttpsConversation(unittest.TestCase):
                 ]}]}
                 return io.BytesIO(json.dumps(response).encode())
 
-            handler = handler_for(token, lambda q, history: openai_answer(q, "api-test", "model-test", history))
+            verify_enabled = False
+
+            def verify():
+                return verify_openai("api-test" if verify_enabled else "", "model-test")
+
+            handler = handler_for(token, lambda q, history: openai_answer(q, "api-test", "model-test", history), verify)
             with patch("proxy.openai_http.open", side_effect=upstream):
                 with TlsServer(("127.0.0.1", 0), handler, tls_context(cert, key)) as server:
                     thread = threading.Thread(target=server.serve_forever)
@@ -136,7 +155,11 @@ class HttpsConversation(unittest.TestCase):
                             with response:
                                 return response.status, json.loads(response.read())
 
+                        self.assertEqual(exchange("/live", supplied=""), (200, {"service": "calcu", "available": True}))
                         self.assertEqual(exchange("/health"), (200, {"service": "calcu", "ready": True}))
+                        self.assertEqual(exchange("/verify")[0], 404)
+                        self.assertEqual(exchange("/verify", {}, supplied="invalid")[0], 401)
+                        self.assertEqual(exchange("/verify", {})[0], 503)
                         self.assertEqual(exchange("/health", supplied="invalid")[0], 401)
                         self.assertEqual(len(upstream_calls), 0)
                         self.assertEqual(exchange("/ask", {"question": "RECUERDA CALCU"}),
@@ -152,6 +175,10 @@ class HttpsConversation(unittest.TestCase):
                         self.assertEqual(exchange("/ask", {"question": "X", "history": history * 5})[0], 400)
                         self.assertEqual(exchange("/ask", {"question": "X", "history": [{"question": "X"}]})[0], 400)
                         self.assertEqual(len(upstream_calls), 2)
+                        verify_enabled = True
+                        self.assertEqual(exchange("/verify", {}), (200, {"service": "calcu", "openai": True}))
+                        self.assertEqual(upstream_calls[-1], [{"role": "user", "content": "Responde únicamente OK."}])
+                        self.assertEqual(len(upstream_calls), 3)
                         with self.assertRaises(urllib.error.URLError) as error:
                             urllib.request.urlopen(base + "/health", timeout=3)
                         self.assertIsInstance(error.exception.reason, ssl.SSLCertVerificationError)
