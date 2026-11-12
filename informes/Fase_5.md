@@ -55,7 +55,10 @@ Se observó el inicio en calculadora y el panel de configuración. Al pulsar **P
 
 ## GitHub
 
-El commit de la Fase 4 se conservó como antecesor de la Fase 5. La autorización de la cuenta pasó y la comprobación previa indicó que `main` podía avanzar sin forzar. La verificación remota y los enlaces se registrarán tras publicar ambos commits.
+Se publicaron ambos commits en `main` mediante un avance normal. Se verificó el hash remoto con `git ls-remote` y que el commit de la Fase 4 es antecesor del de la Fase 5. Se revisaron los 48 archivos del índice para excluir claves, configuraciones privadas, binarios y temporales.
+
+- [Fase 4 · `154e583`](https://github.com/mau07050709-dot/Calcu/commit/154e583d90e33376b9d4d3b877b5ef67c192027a)
+- [Fase 5 · `d0c172c`](https://github.com/mau07050709-dot/Calcu/commit/d0c172c63b24ff2b02d8933beeb09abf6611badb)
 
 ## Recomendaciones para la siguiente fase
 
